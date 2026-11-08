@@ -34,6 +34,17 @@ pub fn ctx_of(recipe: &Recipe, settings: &LaneSettings) -> u32 {
     if recipe.ctx_max > 0 { ctx.min(recipe.ctx_max) } else { ctx }
 }
 
+/// The context of a lane with `slots` slots: a shared pool grows with them, so each conversation
+/// keeps the room it had. A window per slot stays as it is.
+pub fn ctx_for_slots(recipe: &Recipe, settings: &LaneSettings, slots: u32) -> u32 {
+    let ctx = ctx_of(recipe, settings);
+    if ctx == 0 || recipe.ctx_per_slot || recipe.kv_bytes_per_token == 0 {
+        return settings.ctx;
+    }
+    let scaled = (ctx as u64 * slots as u64 / slots_of(recipe, settings).max(1) as u64).max(recipe.ctx_min_per_slot as u64 * slots as u64);
+    (if recipe.ctx_max > 0 { scaled.min(recipe.ctx_max as u64) } else { scaled }) as u32
+}
+
 /// Fit `settings` on `gpu`, where `others` bytes are taken by the other lanes.
 pub fn check(recipe: &Recipe, settings: &LaneSettings, gpu: &Gpu, usable: u64, others: u64) -> Fit {
     let (weights, kv, compute) = bytes(recipe, settings);

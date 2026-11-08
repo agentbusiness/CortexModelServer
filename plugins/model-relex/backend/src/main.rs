@@ -81,6 +81,10 @@ async fn probe(engine: Arc<Engine>) -> ProbeReport {
         };
         return ProbeReport::from_checks(vec![check("model installing", started, Ok(detail))]);
     }
+    // CortexModelServer patch: a lane loads its model on the first real call, not for the self-test.
+    if std::env::var_os("CORTEX_LANE").is_some() {
+        return ProbeReport::from_checks(vec![check("model installed", started, Ok("loads on its first call".to_owned()))]);
+    }
     let params = json!({"relex": {
         "text": "Ada Lovelace worked with Charles Babbage in London.",
         "kinds": ["person", "location"],
@@ -183,7 +187,55 @@ fn worker(args: &[String]) -> i32 {
     }
 }
 
+/// CortexModelServer patch: the folder of NVIDIA's libraries, in the installed model-llama package
+/// (`plugins/model-llama/<version>/backend/llama`) that has every library the CUDA build links.
+fn cuda_libraries() -> Option<PathBuf> {
+    const NEEDED: [&str; 4] = ["libcudart.so", "libcublas.so", "libcublasLt.so", "libcurand.so"];
+    let exe = std::env::current_exe().ok()?;
+    let plugins = exe.ancestors().nth(4)?;
+    let holds_all = |dir: &PathBuf| {
+        let names: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|file| file.file_name().to_string_lossy().into_owned()).collect();
+        NEEDED.iter().all(|lib| names.iter().any(|name| name.starts_with(&format!("{lib}."))))
+    };
+    std::fs::read_dir(plugins.join("model-llama")).ok()?.flatten().map(|version| version.path().join("backend/llama")).filter(holds_all).max()
+}
+
+/// CortexModelServer patch: whether every GPU here runs the CUDA build's kernels (compute capability
+/// 8.0 or newer, see build.sh). candle has no way back to the CPU once a kernel fails to load.
+fn gpus_run_cuda_build() -> bool {
+    let Ok(output) = std::process::Command::new("nvidia-smi").args(["--query-gpu=compute_cap", "--format=csv,noheader"]).output() else { return false };
+    let caps = String::from_utf8_lossy(&output.stdout).into_owned();
+    output.status.success() && !caps.trim().is_empty() && caps.lines().all(|cap| cap.trim().parse::<f32>().is_ok_and(|cap| cap >= 8.0))
+}
+
+/// CortexModelServer patch: become the package's CUDA build (`cuda/` beside this executable, Linux
+/// only, see build.sh) when NVIDIA's driver and libraries are here. Otherwise this build runs, on
+/// the CPU: the CUDA build would not even start.
+fn become_cuda_build() {
+    use std::os::unix::process::CommandExt;
+    unsafe extern "C" {
+        fn dlopen(file: *const std::ffi::c_char, mode: std::ffi::c_int) -> *mut std::ffi::c_void;
+    }
+    const RTLD_LAZY: std::ffi::c_int = 1;
+    if !cfg!(target_os = "linux") || cfg!(feature = "cuda") {
+        return;
+    }
+    // SAFETY: a constant library name; the handle is kept for the life of the process.
+    if unsafe { dlopen(c"libcuda.so.1".as_ptr(), RTLD_LAZY) }.is_null() {
+        return;
+    }
+    let Some(build) = std::env::current_exe().ok().map(|exe| exe.with_file_name("cuda").join(env!("CARGO_BIN_NAME"))).filter(|path| path.is_file()) else { return };
+    if !gpus_run_cuda_build() {
+        return;
+    }
+    let Some(libraries) = cuda_libraries() else { return };
+    let path = std::env::join_paths(std::iter::once(libraries).chain(std::env::var_os("LD_LIBRARY_PATH").iter().flat_map(std::env::split_paths))).unwrap_or_default();
+    let error = std::process::Command::new(&build).args(std::env::args_os().skip(1)).env("LD_LIBRARY_PATH", path).exec();
+    eprintln!("cannot start {}: {error}; running on the CPU", build.display());
+}
+
 fn main() {
+    become_cuda_build();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("CORTEX_LOG").unwrap_or_else(|_| "info".into()))

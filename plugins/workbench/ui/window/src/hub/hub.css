@@ -143,7 +143,7 @@
 #cc .cms-diff-what{font:14px/20px "Source Serif 4",Georgia,serif;color:var(--ink);min-width:0;}
 #cc .cms-diff-what .ct-faint{font:500 10px Archivo,sans-serif;letter-spacing:.04em;}
 #cc .cms-diff-why{grid-column:2;font:13px/1.4 "Source Serif 4",Georgia,serif;}
-#cc .cms-cal{display:grid;grid-template-columns:minmax(0,1fr) repeat(4,auto);column-gap:12px;row-gap:4px;align-items:baseline;font:500 11px Archivo,sans-serif;}
+#cc .cms-cal{display:grid;grid-template-columns:minmax(0,1fr) repeat(7,auto);column-gap:12px;row-gap:4px;align-items:baseline;font:500 11px Archivo,sans-serif;}
 #cc .cms-cal>.cms-num{text-align:right;}
 #cc .cms-cal-name{font:14px "Source Serif 4",Georgia,serif;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 #cc .cms-cal-error{grid-column:2 / -1;margin:0;}

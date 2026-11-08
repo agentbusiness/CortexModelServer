@@ -19,6 +19,11 @@ pub mod tags {
     /// Everyday machine and office work (CortexTerm's terminal flow, GlobalCortex): Gemma by default.
     /// Apps that accept it also accept a `coding` model, so one model per machine serves them all.
     pub const OFFICE: &str = "office";
+    /// The small office model (Gemma 4 E2B), kept apart from `office` so a call for `office` always
+    /// gets the same E4B. An app that can work with it claims it after `office`.
+    pub const SMALL_OFFICE: &str = "smalloffice";
+    /// The large office model (Gemma 4 26B-A4B): only a call that selected it claims it.
+    pub const LARGE_OFFICE: &str = "largeoffice";
     // CortexModelServer: the tags of the models this app lends beside the two above.
     /// Embedding: texts to vectors (`model.embed`), no generation.
     pub const EMBED: &str = "embed";
@@ -230,6 +235,10 @@ pub struct ChatMessage {
     /// over `content`, which stays the plain text, so text-only consumers keep working.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<ContentPart>,
+    /// This last assistant message was cut off: the model goes on writing it in place, instead of
+    /// starting a new reply. An engine that cannot continue ignores it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub open_prefix: bool,
 }
 
 /// One part of a multimodal message. An image is referenced by its file in the attachment store
@@ -288,6 +297,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             parts: Vec::new(),
+            open_prefix: false,
         }
     }
 }

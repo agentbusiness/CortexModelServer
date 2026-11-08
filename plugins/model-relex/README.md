@@ -33,16 +33,27 @@ The dependencies are the worker's, at the same versions and features: `candle-co
 `anyhow`. What the lane does, unchanged: the encoder in f16 (`LAB_RELEX_DTYPE=f32` for 32 bits; the
 plugin's `encoder_dtype` sets it), the heads in f32, the BiLSTM on the CPU, texts in windows of whole
 sentences of at most 768 subtokens, a warm pass at load, a device synchronize after each passage.
-Device: Metal when available, else CUDA (a build with `--features cuda`), else the CPU.
+Device: Metal when available, else CUDA (Linux, where NVIDIA's driver is), else the CPU.
 
 `backend/src/main.rs` adds only what the knowledge app's worker gave the lane (`Args { model }`, `emit`,
 `model_name`, the last two copied from the knowledge app's `model-worker/src/main.rs`).
 
 ## CortexModelServer changes
 
+Loading on demand (`backend/src/main.rs`, a marked patch): a lane's self-test does not load the model
+when its weights are here.
+
 None in the copied files: `backend/src/relex/` needed none of the renames the embedder took (the
 knowledge app's name appears nowhere in it), so it is still byte for byte the origin's. Only prose
 (comments, this README, the descriptions) names the origin as "the knowledge app".
+
+Outside the copied files, the Linux package carries a CUDA build. candle links NVIDIA's libraries at
+build time, so a CUDA executable does not start without the driver. `backend/build.sh` builds the
+plain executable and, on Linux, a second one with `--features cuda` in `cuda/`. The plain one becomes
+the CUDA one (`become_cuda_build` in `src/main.rs`) when `libcuda.so.1` loads and an installed
+model-llama package holds NVIDIA's libraries, which it ships for llama-server (so the Linux release
+carries them once). It also needs every GPU at compute capability 8.0 or newer (`nvidia-smi`): candle
+0.11's kernels do not compile for older ones with CUDA 13. Otherwise it stays on the CPU.
 
 ## How it runs
 
@@ -95,6 +106,6 @@ holds its own copy of the model in memory.
 
 ## Building
 
-`cargo build --release` in `backend/` (Rust 1.94.1, this folder's `rust-toolchain.toml`); on Linux
-with an NVIDIA GPU, `cargo build --release --features cuda` (CUDA toolkit needed). Without a frame:
+`sh build.sh` in `backend/` (Rust 1.94.1, this folder's `rust-toolchain.toml`; on Linux the CUDA
+toolkit is needed). Without a frame:
 `cc-model-relex call model.extract '{"relex":{"text":"...","kinds":["person"]}}'`.

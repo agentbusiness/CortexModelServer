@@ -1,26 +1,33 @@
-//! The automatic plan: which lanes this computer runs.
+//! The plan: which lanes this computer runs. It starts with none: only a lane set by hand or a
+//! model a Cortex app on this computer has selected runs here.
 //!
 //! 1. Lanes set by hand stay as they are (their memory is taken first).
-//! 2. What the Cortex apps on this computer use comes next: for each model an app's card lists,
-//!    the recipe of the same model (same weights first, else the same family and tag), so the
-//!    app finds it loaded here and loads no copy of its own (the standard's "a model already in
-//!    memory on this computer is used before one is loaded"). A model an app has loaded itself
-//!    stays the app's: no second copy, and its memory is taken before anything is planned.
-//! 3. Then each GPU, largest first, by its size: a coding model on a GPU of 24 GB or more (the
-//!    largest recipe that fits), the office model on one of 9 GB or more (Gemma 4 E4B, else E2B
-//!    on a small one), each once per GPU.
-//! 4. Then once per computer, on the GPU with the most room left: the rapid model, an embedder
-//!    and the extractor.
+//! 2. What the Cortex apps on this computer have selected comes next: for each model an app's card
+//!    lists, the recipe of the same model (same weights first, else the same family and tag). The
+//!    selection is kept while the app is away. This app says the highest sharing priority on its
+//!    card, so an app whose tags a lane serves stops its own model and uses the lane
+//!    (`mesh::Card::sharing_priority`); what it has loaded now is not counted against the plan, and a lane
+//!    waits to load until the app has let go of it.
 //!
 //! Every lane is fitted (weights + KV + buffers, beside the lanes already on its GPU) and its
 //! context shrunk to fit when needed; one that does not fit is left out with a note. No GPU: no
 //! lanes (the standard's GPU rule).
+//!
+//! A planned lane runs the slots and drafting the last full calibration found for it, measured
+//! with the other lanes of its GPU busy, with its context sized for those slots; before one has
+//! run, its recipe's defaults. A lane goes to the GPU calibration moved it to.
 
 use crate::fit;
-use cc_protocol::contracts::serve::{Gpu, LaneSettings, PlanChange, Recipe, Want, kinds};
+use cc_protocol::contracts::serve::{Gpu, LaneSettings, PlanChange, Recipe, Want};
 use std::collections::{BTreeMap, BTreeSet};
 
-const GIB: u64 = 1 << 30;
+/// What a full calibration found for a lane.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Tuned {
+    pub slots: u32,
+    pub speculative: Option<bool>,
+    pub draft_max: Option<u32>,
+}
 
 pub struct Input<'a> {
     pub recipes: &'a [Recipe],
@@ -32,6 +39,10 @@ pub struct Input<'a> {
     pub taken: BTreeMap<u32, u64>,
     /// Planned lanes removed by hand (`<recipe>-g<gpu>`).
     pub declined: &'a BTreeSet<String>,
+    /// What the last full calibration found, by lane id.
+    pub calibrated: &'a BTreeMap<String, Tuned>,
+    /// The GPU calibration moved a recipe to.
+    pub moved: &'a BTreeMap<String, u32>,
 }
 
 pub struct Output {
@@ -47,6 +58,13 @@ struct Room<'a> {
     lanes: Vec<LaneSettings>,
     notes: Vec<String>,
     declined: &'a BTreeSet<String>,
+    calibrated: &'a BTreeMap<String, Tuned>,
+}
+
+/// A planned lane's id: the recipe and the GPU.
+pub fn base_id(recipe: &str, gpu: u32) -> String {
+    let base: String = format!("{recipe}-g{gpu}").chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+    base.trim_matches('-').chars().take(60).collect()
 }
 
 impl Room<'_> {
@@ -63,16 +81,22 @@ impl Room<'_> {
         if self.declined.contains(&format!("{}-g{}", recipe.id, gpu.index)) {
             return false;
         }
-        if recipe.min_gpu_bytes > 0 && gpu.memory_bytes < recipe.min_gpu_bytes {
+        let on_device = runs_on(recipe, gpu);
+        if on_device && recipe.min_gpu_bytes > 0 && gpu.memory_bytes < recipe.min_gpu_bytes {
             return false;
         }
         if !recipe.backends.is_empty() && !recipe.backends.iter().any(|backend| *backend == gpu.backend || backend == "cpu") {
             return false;
         }
-        let free = self.free(gpu);
-        let slots = recipe.slots_default.max(1);
+        let free = if on_device { self.free(gpu) } else { u64::MAX };
+        let id = self.lane_id(&recipe.id, gpu.index);
+        let found = self.calibrated;
+        let tuned = found.get(&id).filter(|tuned| tuned.slots > 0);
+        let calibrated = tuned.map(|tuned| tuned.slots);
+        let slots = calibrated.unwrap_or(recipe.slots_default.max(1)).min(recipe.slots_max.max(1));
         let windows = if recipe.ctx_per_slot { slots as u64 } else { 1 };
-        let per_window = Recipe { kv_bytes_per_token: recipe.kv_bytes_per_token * windows, ..recipe.clone() };
+        let wanted = fit::ctx_for_slots(recipe, &LaneSettings { slots: recipe.slots_default, ..LaneSettings::default() }, slots);
+        let per_window = Recipe { kv_bytes_per_token: recipe.kv_bytes_per_token * windows, ctx_default: if wanted > 0 { wanted } else { recipe.ctx_default }, ..recipe.clone() };
         let Some(ctx) = fit::best_ctx(&per_window, free) else {
             return false;
         };
@@ -82,21 +106,21 @@ impl Room<'_> {
         if slots == 0 {
             return false;
         }
-        let slots = if recipe.slots_default == 0 { 0 } else { slots };
-        let mut settings = LaneSettings { id: String::new(), recipe: recipe.id.clone(), gpu: gpu.index, slots, ctx, lend: true, ..LaneSettings::default() };
-        settings.id = self.lane_id(&recipe.id, gpu.index);
+        let slots = if recipe.slots_default == 0 && calibrated.is_none() { 0 } else { slots };
+        let settings = LaneSettings { id, recipe: recipe.id.clone(), gpu: gpu.index, slots, ctx, lend: true, speculative: tuned.and_then(|tuned| tuned.speculative), draft_max: tuned.and_then(|tuned| tuned.draft_max), ..LaneSettings::default() };
         let bytes = fit::total(recipe, &settings);
         if bytes > free {
             return false;
         }
-        *self.used.entry(gpu.index).or_default() += bytes;
+        if on_device {
+            *self.used.entry(gpu.index).or_default() += bytes;
+        }
         self.lanes.push(settings);
         true
     }
 
     fn lane_id(&self, recipe: &str, gpu: u32) -> String {
-        let base: String = format!("{recipe}-g{gpu}").chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
-        let base = base.trim_matches('-').chars().take(60).collect::<String>();
+        let base = base_id(recipe, gpu);
         let mut id = base.clone();
         let mut n = 2;
         while self.lanes.iter().any(|lane| lane.id == id) {
@@ -105,120 +129,52 @@ impl Room<'_> {
         }
         id
     }
-
-    fn has(&self, test: impl Fn(&Recipe) -> bool) -> bool {
-        self.lanes.iter().any(|lane| self.recipe(&lane.recipe).is_some_and(&test))
-    }
-
-    fn on_gpu(&self, gpu: u32, test: impl Fn(&Recipe) -> bool) -> bool {
-        self.lanes.iter().any(|lane| lane.gpu == gpu && self.recipe(&lane.recipe).is_some_and(&test))
-    }
 }
 
-fn tagged(recipe: &Recipe, tag: &str) -> bool {
-    recipe.tags.iter().any(|t| t == tag)
-}
-
-/// The candidates for a role, best first: available, picked automatically, then the engine
-/// order of the platform (on a Mac uzu first, the engine CortexCode runs its model on), then
-/// larger weights.
-fn candidates<'a>(recipes: &'a [Recipe], test: impl Fn(&Recipe) -> bool) -> Vec<&'a Recipe> {
-    let mut out: Vec<&Recipe> = recipes.iter().filter(|recipe| recipe.available && recipe.auto && test(recipe)).collect();
-    let engine_rank = |engine: &str| match engine {
-        "model-uzu" => 0,
-        "model-llama" => 1,
-        "model-llama-agent" => 2,
-        "model-bonsai" => 3,
-        _ => 4,
-    };
-    out.sort_by(|a, b| engine_rank(&a.engine).cmp(&engine_rank(&b.engine)).then(b.weights_bytes.cmp(&a.weights_bytes)));
-    out
+/// Whether a lane of `recipe` runs on `gpu` itself. One whose engine has no path to this kind of
+/// GPU (the embedder and extractor on Vulkan) runs on the CPU and takes none of its memory.
+fn runs_on(recipe: &Recipe, gpu: &Gpu) -> bool {
+    recipe.backends.is_empty() || recipe.backends.iter().any(|backend| *backend == gpu.backend)
 }
 
 pub fn plan(input: Input) -> Output {
     let mut gpus: Vec<&Gpu> = input.gpus.iter().collect();
     gpus.sort_by(|a, b| b.memory_bytes.cmp(&a.memory_bytes).then(a.index.cmp(&b.index)));
-    let mut room = Room { recipes: input.recipes, gpus: input.gpus, reserve: input.reserve, used: input.taken.clone(), lanes: Vec::new(), notes: Vec::new(), declined: input.declined };
+    let mut room = Room { recipes: input.recipes, gpus: input.gpus, reserve: input.reserve, used: input.taken.clone(), lanes: Vec::new(), notes: Vec::new(), declined: input.declined, calibrated: input.calibrated };
     if gpus.is_empty() {
         room.notes.push("No GPU: this computer serves no model (models run on Metal, CUDA or Vulkan only).".into());
         return Output { lanes: input.manual, notes: room.notes };
     }
     // 1. Lanes set by hand.
     for lane in input.manual {
-        if let Some(recipe) = room.recipe(&lane.recipe).cloned() {
+        if let Some(recipe) = room.recipe(&lane.recipe).cloned()
+            && room.gpus.iter().any(|gpu| gpu.index == lane.gpu && runs_on(&recipe, gpu))
+        {
             *room.used.entry(lane.gpu).or_default() += fit::total(&recipe, &lane);
         }
         room.lanes.push(lane);
     }
-    // What the apps here already serve from memory: those tags need no lane (one copy per computer).
-    let covered: BTreeSet<String> = input.wants.iter().filter(|want| want.loaded).flat_map(|want| want.tags.iter().cloned()).collect();
-    let covered_recipes: BTreeSet<String> = input.wants.iter().filter(|want| want.loaded && !want.recipe.is_empty()).map(|want| want.recipe.clone()).collect();
-    // 2. What the apps on this computer use.
+    // 2. What the apps on this computer have selected.
     let mut served_wants = BTreeSet::new();
     for want in input.wants {
-        // An app that has the model in memory itself keeps serving it: no second copy.
-        if want.loaded || want.recipe.is_empty() || covered_recipes.contains(&want.recipe) || want.tags.iter().any(|tag| covered.contains(tag)) || served_wants.contains(&want.recipe) || room.lanes.iter().any(|lane| lane.recipe == want.recipe) {
+        if want.recipe.is_empty() || served_wants.contains(&want.recipe) || room.lanes.iter().any(|lane| lane.recipe == want.recipe) {
             continue;
         }
         let Some(recipe) = room.recipe(&want.recipe).cloned() else { continue };
-        let placed = gpus.iter().any(|gpu| room.place(&recipe, gpu));
+        let mut order = gpus.clone();
+        if let Some(moved) = input.moved.get(&recipe.id) {
+            order.sort_by_key(|gpu| gpu.index != *moved);
+        }
+        let placed = order.iter().any(|gpu| room.place(&recipe, gpu));
         if placed {
             served_wants.insert(want.recipe.clone());
         } else {
             room.notes.push(format!("{} uses {}, which does not fit beside the other lanes here.", want.app, recipe.name));
         }
     }
-    // 3. Per GPU: a coding model on a large one, the office model on every one that holds it.
-    for gpu in &gpus {
-        let gpu = *gpu;
-        if gpu.memory_bytes >= 24 * GIB && !covered.contains("coding") && !room.on_gpu(gpu.index, |r| tagged(r, "coding")) {
-            for recipe in candidates(input.recipes, |r| r.kind == kinds::CHAT && tagged(r, "coding")) {
-                if room.place(recipe, gpu) {
-                    break;
-                }
-            }
-        }
-        if !covered.contains("office") && !room.on_gpu(gpu.index, |r| tagged(r, "office")) {
-            let office = candidates(input.recipes, |r| r.kind == kinds::CHAT && tagged(r, "office"));
-            // The office model answers the same whichever computer lends it: the E4B first,
-            // the smaller E2B only where the E4B does not fit.
-            let mut sorted = office.clone();
-            sorted.sort_by_key(|recipe| (!recipe.id.contains("e4b"), !recipe.id.contains("e2b")));
-            for recipe in sorted {
-                if room.place(recipe, gpu) {
-                    break;
-                }
-            }
-        }
+    if room.lanes.is_empty() {
+        room.notes.push("No Cortex app on this computer has selected a model yet, and no lane was set by hand.".into());
     }
-    // 4. Once per computer, where there is most room.
-    let once: [(&str, Box<dyn Fn(&Recipe) -> bool>); 3] = [
-        ("rapid", Box::new(|r: &Recipe| r.kind == kinds::CHAT && tagged(r, "rapid"))),
-        ("embed", Box::new(|r: &Recipe| r.kind == kinds::EMBED)),
-        ("extract", Box::new(|r: &Recipe| r.kind == kinds::EXTRACT)),
-    ];
-    for (role, test) in once.iter() {
-        if room.has(|r| test(r)) {
-            continue;
-        }
-        // An app here keeps this kind of model loaded itself (its tags are a recipe's of the role).
-        if input.recipes.iter().any(|r| test(r) && r.tags.iter().any(|tag| covered.contains(tag))) {
-            continue;
-        }
-        let mut by_room: Vec<&Gpu> = gpus.clone();
-        by_room.sort_by_key(|gpu| std::cmp::Reverse(room.free(gpu)));
-        let mut placed = false;
-        for recipe in candidates(input.recipes, |r| test(r)) {
-            if by_room.iter().any(|gpu| room.place(recipe, gpu)) {
-                placed = true;
-                break;
-            }
-        }
-        if !placed && candidates(input.recipes, |r| test(r)).is_empty() {
-            room.notes.push(format!("No {role} recipe runs on this computer."));
-        }
-    }
-    let _ = room.gpus;
     Output { lanes: room.lanes, notes: room.notes }
 }
 

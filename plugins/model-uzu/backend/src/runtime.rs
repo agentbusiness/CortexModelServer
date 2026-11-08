@@ -93,6 +93,10 @@ pub struct Config {
     /// Pixel budget per image; larger images are downscaled (default 2,400,000, about 2,340 tokens).
     #[serde(default)]
     pub max_image_pixels: Option<u64>,
+    /// CortexModelServer patch: when set, the model loads on its first real call and unloads after
+    /// this many seconds without one. Unset (CortexCode's behaviour): it loads at start and stays.
+    #[serde(default)]
+    pub idle_unload_s: Option<u64>,
     /// Keys this plugin does not use (the frame may add machine facts); logged, not rejected.
     #[serde(flatten)]
     pub other: serde_json::Map<String, Value>,
@@ -309,7 +313,16 @@ enum Phase {
     Loading(String),
     Ready(Arc<Loaded>),
     Failed(String),
+    /// CortexModelServer patch: no model in memory; the next real call loads it.
+    Unloaded,
 }
+
+/// CortexModelServer patch: how often an on-demand model is looked at.
+const ON_DEMAND_WATCH: Duration = Duration::from_secs(5);
+/// CortexModelServer patch: how long a failed load stands before the next call may try again.
+const ON_DEMAND_RETRY: Duration = Duration::from_secs(60);
+/// CortexModelServer patch: how long calls that already hold the model get to finish at unload.
+const ON_DEMAND_DRAIN: Duration = Duration::from_secs(10);
 
 pub struct Runtime {
     pub paths: Paths,
@@ -321,6 +334,12 @@ pub struct Runtime {
     switch: tokio::sync::Mutex<()>,
     /// Conversations a predecessor hibernated, adopted once the model is loaded.
     adopted: std::sync::Mutex<Vec<Hibernated>>,
+    /// CortexModelServer patch: a call needs the model that is not loaded.
+    wake: tokio::sync::Notify,
+    /// CortexModelServer patch: the last real call.
+    last_used: std::sync::Mutex<Instant>,
+    /// CortexModelServer patch: what the model reported when it was last in memory.
+    last_info: std::sync::Mutex<Option<ModelInfo>>,
 }
 
 /// Sets the request's stop flag when the owning future is dropped (cancellation).
@@ -397,6 +416,9 @@ impl Runtime {
             phase,
             switch: tokio::sync::Mutex::new(()),
             adopted: std::sync::Mutex::new(Vec::new()),
+            wake: tokio::sync::Notify::new(),
+            last_used: std::sync::Mutex::new(Instant::now()),
+            last_info: std::sync::Mutex::new(None),
         })
     }
 
@@ -411,6 +433,7 @@ impl Runtime {
             Phase::Loading(variant) => json!({"state": "loading", "variant": variant}),
             Phase::Ready(loaded) => json!({"state": "ready", "variant": loaded.variant}),
             Phase::Failed(error) => json!({"state": "failed", "error": error}),
+            Phase::Unloaded => json!({"state": "unloaded"}),
         };
         // Every progress tick is a `model.install` event; the state changes only on entering it.
         let entering = !matches!(phase, Phase::Installing(_)) || !matches!(&*self.phase.borrow(), Phase::Installing(_));
@@ -422,7 +445,145 @@ impl Runtime {
 
     /// Load the configured variant (called once at start, in the background).
     pub async fn start(self: &Arc<Self>) {
+        // CortexModelServer patch: a lane with an idle time loads on demand.
+        if let Some(idle) = self.config.idle_unload_s {
+            return self.run_on_demand(Duration::from_secs(idle)).await;
+        }
         let _switch = self.switch.lock().await;
+        self.load_configured().await;
+    }
+
+    /// CortexModelServer patch: whether the model loads on its first real call.
+    pub fn on_demand(&self) -> bool {
+        self.config.idle_unload_s.is_some()
+    }
+
+    /// CortexModelServer patch: the configured variant's files are on this computer.
+    pub fn installed(&self) -> bool {
+        let variant = self.configured_variant();
+        variants::find(&variant).is_some_and(|spec| variants::installed(spec, &spec.local_dir(&self.paths.models_dir)))
+    }
+
+    fn is_unloaded(&self) -> bool {
+        matches!(&*self.phase.borrow(), Phase::Unloaded)
+    }
+
+    fn touch(&self) {
+        if let Ok(mut at) = self.last_used.lock() {
+            *at = Instant::now();
+        }
+    }
+
+    /// CortexModelServer patch: serve an on-demand model for the life of the process: load it when
+    /// a call asks, unload it after `idle` without a call.
+    async fn run_on_demand(self: &Arc<Self>, idle: Duration) {
+        self.set_phase(Phase::Unloaded);
+        let mut failed_at: Option<Instant> = None;
+        loop {
+            if tokio::time::timeout(ON_DEMAND_WATCH, self.wake.notified()).await.is_ok() {
+                let _switch = self.switch.lock().await;
+                if self.is_unloaded() {
+                    self.load_configured().await;
+                    self.touch();
+                }
+                continue;
+            }
+            if matches!(&*self.phase.borrow(), Phase::Failed(_)) {
+                if failed_at.get_or_insert_with(Instant::now).elapsed() >= ON_DEMAND_RETRY {
+                    failed_at = None;
+                    self.set_phase(Phase::Unloaded);
+                }
+                continue;
+            }
+            failed_at = None;
+            let Some(loaded) = self.current() else { continue };
+            let view = loaded.engine.view();
+            if view.busy > 0 || view.queued.foreground + view.queued.agent + view.queued.background > 0 {
+                self.touch();
+                continue;
+            }
+            let quiet = self.last_used.lock().is_ok_and(|at| at.elapsed() >= idle);
+            // Only the phase's handle and this one: nothing in flight.
+            if !quiet || Arc::strong_count(&loaded) > 2 {
+                continue;
+            }
+            let Ok(_switch) = self.switch.try_lock() else { continue };
+            self.unload(loaded).await;
+        }
+    }
+
+    /// CortexModelServer patch: release the model. Its conversations stay on disk and come back
+    /// at the next load.
+    async fn unload(self: &Arc<Self>, loaded: Arc<Loaded>) {
+        tracing::info!(variant = %loaded.variant, "unloading the idle model");
+        let records = self.hibernate_all().await;
+        let mut info = self.info(&loaded);
+        if let Some(vision) = info.vision.as_mut() {
+            vision.loaded = false;
+        }
+        if let Ok(mut last) = self.last_info.lock() {
+            *last = Some(info);
+        }
+        self.set_phase(Phase::Unloaded);
+        let started = Instant::now();
+        while Arc::strong_count(&loaded) > 1 && started.elapsed() < ON_DEMAND_DRAIN {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let engine = loaded.engine.clone();
+        drop(loaded);
+        let _ = tokio::task::spawn_blocking(move || engine.shutdown()).await;
+        if let Ok(mut adopted) = self.adopted.lock() {
+            adopted.extend(records);
+        }
+    }
+
+    /// CortexModelServer patch: `model.info` that never loads the model.
+    pub fn info_without_loading(&self) -> Result<ModelInfo, RpcError> {
+        if let Some(loaded) = self.current() {
+            return Ok(self.info(&loaded));
+        }
+        if let Some(info) = self.last_info.lock().ok().and_then(|last| last.clone()) {
+            return Ok(info);
+        }
+        let variant = self.configured_variant();
+        let spec = variants::find(&variant).ok_or_else(|| unavailable(format!("unknown variant `{variant}`")))?;
+        let dir = spec.local_dir(&self.paths.models_dir);
+        let support = self.vision_support(spec, &dir).map_err(unavailable)?;
+        Ok(ModelInfo {
+            kind: cc_protocol::contracts::model::kinds::CHAT.to_owned(),
+            model_id: spec.model_id(),
+            path: dir.display().to_string(),
+            family: spec.family.to_owned(),
+            tags: spec.tags.iter().map(|tag| (*tag).to_owned()).collect(),
+            quant: spec.quant.to_owned(),
+            file_bytes: spec.total_bytes(),
+            // The fit is known only at load: the lane's own context until then (0: not known).
+            ctx_total: self.config.ctx_total.map_or(0, |ctx| u32::try_from(ctx).unwrap_or(u32::MAX)),
+            ctx_native: 0,
+            slots: self.config.slots.unwrap_or(1),
+            kv_type: "bf16".into(),
+            speculative: String::new(),
+            backend: "metal".into(),
+            tensor_api: None,
+            engine_revision: ENGINE_REVISION.into(),
+            extra: json!({"configured_variant": variant, "repo": spec.repo, "revision": spec.revision}),
+            vision: support.tower.map(|_| {
+                let available = support.available();
+                VisionInfo {
+                    available: available.is_ok(),
+                    loaded: false,
+                    max_image_pixels: support.max_pixels,
+                    max_image_tokens: u32::try_from(support.max_pixels / (32 * 32)).unwrap_or(u32::MAX),
+                    idle_unload_s: support.idle_unload_s,
+                    detail: available.err(),
+                }
+            }),
+            variant,
+        })
+    }
+
+    /// Load the configured variant, the caller holding the switch.
+    async fn load_configured(self: &Arc<Self>) {
         let variant = self.config.variant.clone().unwrap_or_else(|| variants::DEFAULT_VARIANT.to_owned());
         // A first start has no model on this Mac: it is downloaded now, its progress shown as
         // `model.install` events (the card and the model settings show them), instead of a load
@@ -438,11 +599,14 @@ impl Runtime {
 
     /// The loaded model, once it has loaded (or switched).
     pub async fn ready(&self) -> Result<Arc<Loaded>, RpcError> {
+        // CortexModelServer patch: a call that needs the model is a use of it, and loads it.
+        self.touch();
         let mut rx = self.phase.subscribe();
         loop {
             match &*rx.borrow_and_update() {
                 Phase::Ready(loaded) => return Ok(loaded.clone()),
                 Phase::Failed(error) => return Err(unavailable(format!("the model failed to load: {error}"))),
+                Phase::Unloaded => self.wake.notify_one(),
                 _ => {}
             }
             if rx.changed().await.is_err() {
@@ -459,6 +623,8 @@ impl Runtime {
                 Phase::Ready(loaded) => return Ok(Ok(loaded.clone())),
                 Phase::Installing(progress) => return Ok(Err(progress.clone())),
                 Phase::Failed(error) => return Err(unavailable(format!("the model failed to load: {error}"))),
+                // CortexModelServer patch: the probe of a model not downloaded yet starts it.
+                Phase::Unloaded => self.wake.notify_one(),
                 _ => {}
             }
             if rx.changed().await.is_err() {
@@ -1025,7 +1191,29 @@ impl Runtime {
     }
 
     pub async fn slots(&self) -> Result<SlotsResult, RpcError> {
-        let loaded = self.ready().await?;
+        // CortexModelServer patch: reading the slots of an on-demand model neither loads it nor
+        // counts as a use of it.
+        let loaded = if self.on_demand() {
+            match self.current() {
+                Some(loaded) => loaded,
+                None => {
+                    let slots = self.info_without_loading().map_or(0, |info| info.slots);
+                    return Ok(SlotsResult {
+                        slots: (0..slots).map(|slot| cc_protocol::contracts::model::SlotState { slot, cache_key: None, busy: false, n_tokens: 0, priority: None }).collect(),
+                        queued: 0,
+                        hibernated: Vec::new(),
+                        queued_by_priority: Default::default(),
+                        busy: 0,
+                        pool_tokens: 0,
+                        reserved_tokens: 0,
+                        metrics: None,
+                        loaded: false,
+                    });
+                }
+            }
+        } else {
+            self.ready().await?
+        };
         let view = loaded.engine.view();
         Ok(SlotsResult {
             queued: view.queued.foreground + view.queued.agent + view.queued.background,
@@ -1042,6 +1230,10 @@ impl Runtime {
     }
 
     pub async fn hibernate(&self, params: CacheKeyParams) -> Result<Value, RpcError> {
+        // CortexModelServer patch: an unloaded model has nothing resident to hibernate.
+        if self.on_demand() && self.current().is_none() {
+            return Err(RpcError::not_found(format!("`{}` is not resident: the model is not loaded", params.cache_key)));
+        }
         let loaded = self.ready().await?;
         let (reply, answer) = tokio::sync::oneshot::channel();
         loaded.engine.send(Command::Hibernate { key: params.cache_key, reply }).map_err(unavailable)?;
@@ -1064,12 +1256,24 @@ impl Runtime {
     pub fn forget(&self, cache_key: String) {
         if let Some(loaded) = self.current() {
             let _ = loaded.engine.send(Command::Forget(cache_key));
+        } else if let Ok(mut adopted) = self.adopted.lock() {
+            // CortexModelServer patch: a conversation parked by an idle unload goes too.
+            adopted.retain(|record| {
+                let keep = record.key != cache_key;
+                if !keep {
+                    let _ = std::fs::remove_file(&record.file);
+                }
+                keep
+            });
         }
     }
 
     /// Hibernate every idle conversation and return the records (handed to a successor instance).
     pub async fn hibernate_all(&self) -> Vec<Hibernated> {
-        let Some(loaded) = self.current() else { return Vec::new() };
+        // CortexModelServer patch: an unloaded model hands over what its idle unload parked.
+        let Some(loaded) = self.current() else {
+            return self.adopted.lock().map(|mut records| std::mem::take(&mut *records)).unwrap_or_default();
+        };
         let (reply, answer) = tokio::sync::oneshot::channel();
         if loaded.engine.send(Command::HibernateAll { reply }).is_err() {
             return Vec::new();

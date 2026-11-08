@@ -46,6 +46,8 @@ candle-nn = { version = "=0.10.2", features = ["metal", "accelerate"] }
 default = ["embed"]
 embed = []
 onnx-embed = []
+# CortexModelServer patch: the Linux package's second build (build.sh; needs the CUDA toolkit).
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
 
 [profile.release]
 debug = false

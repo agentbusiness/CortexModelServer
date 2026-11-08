@@ -28,7 +28,7 @@ RUN apt-get update \
  && curl -fsSLo /tmp/cuda-keyring.deb "https://developer.download.nvidia.com/compute/cuda/repos/debian12/$cuda/cuda-keyring_1.1-1_all.deb" \
  && dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
  && apt-get update \
- && apt-get install -y --no-install-recommends cuda-nvcc-13-4 cuda-cudart-dev-13-4 cuda-driver-dev-13-4 libcublas-dev-13-4 \
+ && apt-get install -y --no-install-recommends cuda-nvcc-13-4 cuda-cudart-dev-13-4 cuda-driver-dev-13-4 libcublas-dev-13-4 libcurand-dev-13-4 cuda-nvrtc-dev-13-4 \
  && rm -rf /var/lib/apt/lists/*
 ENV CUDA_HOME=/usr/local/cuda PATH=/usr/local/cuda/bin:$PATH
 

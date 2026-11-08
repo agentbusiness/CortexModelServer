@@ -38,17 +38,23 @@ A model running on a GPU is a **lane**: one model, on one engine, with its own s
 length and prompt cache. A machine runs as many lanes as fit, of any engine, and the same model can
 run in more than one lane (one per GPU, say).
 
-- **Planned for you.** On first start, and whenever the hardware or the apps on the machine change,
-  CortexModelServer plans the lanes. First come the models the Cortex apps on that machine use, so
-  those apps load none of their own. Then, as GPU memory allows, a coding model, a general model, a
-  fast small model, an embedder and an extractor.
+- **Runs what your apps selected.** A computer starts with no lanes. When a Cortex app runs on it,
+  the model selected in that app becomes a lane, if it fits this computer, so the app loads none of
+  its own. A selection is kept while the app is closed. You can add any other lane by hand.
 - **Fitted to memory.** Each lane is sized from its weights, the cache for its context and the
   engine's buffers, and gets that as a hard limit. An engine never plans for the whole GPU when
   other lanes share it.
 - **Yours to change.** Add, edit or remove any lane by hand. Lanes you set stay as you set them; the
   plan keeps running the rest.
 - **Measured.** Calibration times each chat lane on this hardware: one request alone (prefill,
-  decode, time to first token), then every slot at once.
+  decode, time to first token), then reloaded at each slot count its recipe and memory allow, and
+  names the fewest slots that give close to the highest total. The chat lanes of each GPU then run
+  at once, because what fits in memory is not what the GPU can compute together, and the
+  recommendation comes from that run. A full run also tries each lane's drafting (MTP or
+  DFlash), grows a shared context with its slots, measures embedding and extraction, moves lanes
+  between GPUs when that gets more done, and applies all of it, to lanes set by hand too. Calls in progress finish first, but lanes reload several times, so run it
+  when quiet. While a person waits on one lane, new other work on that GPU's other lanes waits its
+  turn, for at most 30 seconds.
 
 ## Engines
 

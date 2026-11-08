@@ -4,7 +4,7 @@
 id = "model-embed"
 name = "Model (embeddings)"
 version = "0.1.0"
-description = "Texts to vectors (model.embed) with the knowledge app's embedder copied as is: bekko-embedding-v1-a8m (ModernBERT, 384 dims, mean-pooled, L2-normalized) on candle, Metal on macOS, else the CPU."
+description = "Texts to vectors (model.embed) with the knowledge app's embedder copied as is: bekko-embedding-v1-a8m (ModernBERT, 384 dims, mean-pooled, L2-normalized) on candle, Metal on macOS, CUDA on Linux where NVIDIA's driver is, else the CPU."
 license = "UNLICENSED"
 platforms = ["macos", "linux"]
 
@@ -14,8 +14,10 @@ platforms = ["macos", "linux"]
 category = "model"
 contract = "model@1"
 dir = "backend"
-build = ["cargo", "build", "--release"]
+build = ["sh", "build.sh"]
 exec = "backend/target/release/cc-model-embed"
+# On Linux the CUDA build, which uses the NVIDIA libraries in model-llama's package (empty on macOS).
+assets = ["backend/target/release/cuda"]
 swap = "drain_first"
 hello_timeout_ms = 60000
 # A first start may download the model (246 MB for bekko).
@@ -29,7 +31,7 @@ uses = []
 model = "bekko-embedding-v1-a8m"   # the only model
 batch_size = 32                    # texts per encoder pass (ordered by length for ModernBERT)
 threads = 4                        # CPU threads (capped at half the cores)
-prefer_gpu = true                  # ModernBERT on Metal when there is one
+prefer_gpu = true                  # ModernBERT on Metal or CUDA when there is one
 max_input_tokens = 512             # tokens read per text at most
 idle_unload_s = 300                # drop the model after this long without a request; 0 keeps it
 download = true                    # fetch the pinned files into ~/.cortex-models when missing

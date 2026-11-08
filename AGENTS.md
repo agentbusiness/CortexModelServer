@@ -31,9 +31,9 @@ memory. Its code was copied from CortexTerm (`../CortexTerm`), which was copied 
 - CPP/1 and routing by method prefix;
 - the wire shape of every contract the apps share (`model@1`, `mesh@1`, `notify@1`, `skills@1`);
 - the mesh: ALPNs, pairing, membership log, card, claims, lending, `mesh.link`;
-- model and resource sharing: model tags (`coding`, `office`, and any other an app lends under), a
+- model and resource sharing: model tags (`coding`, `office`, `smalloffice` for Gemma E2B, `largeoffice` for Gemma 26B, and any other an app lends under), a
   model already in memory on this computer is used before one is loaded (no second copy of one model
-  on a computer), a model only on a GPU (Metal on macOS, CUDA or Vulkan on Linux), one models folder
+  on a computer), the serving order on one computer (each app says its own `sharing_priority` on its card, the highest first; no app knows another by name): an app hands a tag over to an app of a higher priority that serves the tag on the same computer, stops its own model for it, uses the other app's and does not lend it (a model an app does not run is not its to share), a model only on a GPU (Metal on macOS, CUDA or Vulkan on Linux), one models folder
   for every Cortex app (`~/.cortex-models`, `docs/SHARED-MODELS.md`; `shared-models/`);
 - shared services (`protocol/src/contracts/service.rs`);
 - where data lives (below) and the graph's contract: the memory plugin's `graphapi.rs`, `streams.rs`,
@@ -70,7 +70,8 @@ What this copy adds to the standard today (all additive):
    `model.extract`; `mesh.peers` names each member's computer (the machine key the log already holds).
 4. `protocol/src/contracts/model.rs`: `model.embed`, `model.extract`, `ModelInfo.kind`.
 5. `protocol/src/contracts/frame.rs` and `frame/src/`: lanes (`frame.lanes.*`, routing a model call by
-   its `plugin` param).
+   its `plugin` param, `LaneSpec.gpu` and the GPU line: a person's call on a lane goes before other
+   work on that GPU's other lanes, which waits at most 30 s; a lane without `gpu` is not in it).
 6. `protocol/src/contracts/serve.rs`: `serve@1`, this app's own contract.
 
 ## Engines are copied, not rewritten
@@ -92,7 +93,7 @@ whenever an origin app changes its engine):
 | `model-llama` | CortexTerm `plugins/model-llama` (= the knowledge app's worker) | `backend/vendor` (llama.cpp `468ad58`, 4 patches); `server-context.cpp` also equals `model-worker/vendor/llama.cpp` in the knowledge app's repository | `diff -rq` against CortexTerm; `cmp` against the knowledge app's repository |
 | `model-llama-agent` | CortexAgent `vendor/llama.cpp`, `crates/model`, `crates/llama-engine` | `backend/vendor/llama.cpp` as CortexAgent has it now (its `REVISION`, `PATCHES.md`); catalog, fitter and server flags as in `crates/model` | `diff -rq` against `../CortexAgent/vendor/llama.cpp` |
 | `model-relex` | the knowledge app's `model-worker/src/relex` | `backend/src/relex/` (candle 0.11.0, tokenizers 0.22.2) | `diff -rq` against the knowledge app's repository; `Cargo.lock` versions |
-| `model-embed` | the knowledge app's adapters crate, `src/embedding` | `backend/src/embedding/` (candle 0.10.2, the knowledge app's `embed` feature; bekko only), apart from the renames in the plugin's README | `diff -rq` against the knowledge app's repository; `Cargo.lock` versions |
+| `model-embed` | the knowledge app's adapters crate, `src/embedding` | `backend/src/embedding/` (candle 0.10.2, the knowledge app's `embed` feature; bekko only), apart from the renames and the CUDA patch in the plugin's README | `diff -rq` against the knowledge app's repository; `Cargo.lock` versions |
 
 Outside the vendored engines, a plugin's own code may differ from its origin only by a marked
 patch (`// CortexModelServer patch:`, or the plumbing it needs) listed in its README: diff each
@@ -108,11 +109,20 @@ template; the knowledge app's own copy is an older checkout of the same patched 
   environment (`CORTEX_LANE`, `CUDA_VISIBLE_DEVICES` / `GGML_VK_VISIBLE_DEVICES`) and data folder
   (`plugins-data/<exec>/lanes/<id>`). A model call is routed by its `plugin` param to the lane of
   that name. The category's own slot never starts.
-- The serve plugin owns the lanes: they are graph records, planned from the hardware, from what the
-  Cortex apps on this computer use, and from what was set by hand; it sets them in the frame at every
+- The serve plugin owns the lanes: they are graph records. A computer starts with none: they come from
+  what the Cortex apps on this computer have selected (their cards, kept while an app is away; only
+  what fits this computer) and from what was set by hand; it sets them in the frame at every
   start.
+- A full calibration measures every lane, then each GPU's lanes busy at once, and applies what it
+  finds to every lane, including lanes set by hand: slots, drafting (`speculative`, `draft_max`), a
+  shared context sized for the slots, and the GPU of a lane it may move (a lane set by hand, a
+  once-per-computer lane). It never removes a lane.
 - Every lane gets its memory as a limit (`memory_limit_bytes` where the engine has it): an engine
   never plans for the whole GPU when other lanes share it.
+- A lane's process runs from the start, but its model loads on the first real call and unloads after
+  an hour without one (`idle_unload_s`), so it stays on the mesh card with `loaded: false`. Only a
+  pinned lane is loaded ahead of a call. A lane's self-test does not load its model; reading its
+  info or slots neither loads it nor counts as a use.
 
 ## Where data lives
 

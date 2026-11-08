@@ -113,6 +113,10 @@ The variants carry PrismML's vision projector (`…-mmproj-Q8_0.gguf`, 0.63 GB),
 Copied from CortexCode's `plugins/model-bonsai` (version 0.1.20). `backend/vendor/llama.cpp`
 (PrismML `0082ac24`) and `backend/native` (the shim) are byte-identical to CortexCode's. Changes:
 
+- `backend/src/runtime.rs`, `backend/src/plugin.rs`: loading on demand. With `idle_unload_s` set
+  (every lane has it), the model loads on its first real call and unloads after that many seconds
+  without one. `model.info`, `model.slots` and the self-test load nothing while the weights are on
+  this computer. Without the key it loads at start and stays, as CortexCode's.
 - `plugin.toml`, `backend/Cargo.toml`, `ui/*/vite.config.mjs`: CortexCode -> CortexModelServer in the
   header comment, the package description and the build-preset comment. Paths (`../../../protocol`,
   `model-kit`, `shared-models`, `../../../../ui/sdk`) resolve unchanged; the process stays

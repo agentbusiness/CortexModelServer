@@ -176,6 +176,9 @@ pub struct RecipeKeys {
     pub kv_type: String,
     #[serde(default)]
     pub speculative: String,
+    /// How many tokens the drafter proposes at most ("" = not settable).
+    #[serde(default)]
+    pub draft_max: String,
     #[serde(default)]
     pub idle_unload_s: String,
     #[serde(default)]
@@ -215,6 +218,9 @@ pub struct LaneSettings {
     /// Speculative decoding on or off; `None` = the recipe's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub speculative: Option<bool>,
+    /// Tokens the drafter proposes at most; `None` = the recipe's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_max: Option<u32>,
     /// Unload after this long idle (0 = never); `None` = the recipe's default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_unload_s: Option<u32>,
@@ -355,11 +361,71 @@ pub struct Calibration {
     pub at_ms: u64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
+    /// Total output of the lane reloaded at each slot count tried, fewest first.
+    #[serde(default)]
+    pub sweep: Vec<SlotLoad>,
+    /// The slots to run with: the fewest that give close to the highest total output, and when
+    /// the lane shares its GPU with other lanes, measured with them busy too.
+    #[serde(default)]
+    pub best_slots: u32,
+    /// The lane's total output at `best_slots` with the GPU's other lanes busy at once
+    /// (0: not measured).
+    #[serde(default)]
+    pub together_tok_s: f64,
+    /// The slots the lane runs with.
+    #[serde(default)]
+    pub current_slots: u32,
+    /// `chat`, `embed` or `extract`. For the last two `aggregate_tok_s` is what the lane gets
+    /// through (tokens read; words for an extractor), and decode, prefill and first token are 0.
+    #[serde(default)]
+    pub kind: String,
+    /// Total output at the best slots with each drafting setting tried ("off", "on", or a depth).
+    #[serde(default)]
+    pub drafts: Vec<DraftLoad>,
+    /// The drafting setting to run with ("": the lane has none that can be set).
+    #[serde(default)]
+    pub best_draft: String,
+    /// Context tokens at `best_slots`, so each conversation keeps the room it had.
+    #[serde(default)]
+    pub ctx: u32,
+    /// The GPU this lane was moved to, because it got more done there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_to: Option<u32>,
+    /// Why no higher slot count was tried, when one was refused or failed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sweep_note: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DraftLoad {
+    pub label: String,
+    pub tok_s: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SlotLoad {
+    pub slots: u32,
+    /// Generated tokens per second in total, wall clock.
+    pub tok_s: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct CalibrationResult {
     pub results: Vec<Calibration>,
+    /// GPUs whose lanes were measured together.
+    #[serde(default)]
+    pub gpus: Vec<GpuShare>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct GpuShare {
+    pub gpu: u32,
+    /// With its lanes busy at once: the sum of each lane's output over its best alone.
+    /// 1.0 is a GPU that splits its time with nothing lost; below, the lanes get in each other's
+    /// way; above, they run side by side.
+    pub kept: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
 }
 
 /// This computer's server now.

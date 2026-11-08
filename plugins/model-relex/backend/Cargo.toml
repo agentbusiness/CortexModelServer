@@ -38,7 +38,7 @@ regex = "1"
 
 [features]
 default = []
-# Linux with an NVIDIA GPU: `cargo build --release --features cuda` (needs the CUDA toolkit).
+# CortexModelServer patch: the Linux package's second build (build.sh; needs the CUDA toolkit).
 cuda = ["candle-core/cuda", "candle-nn/cuda"]
 
 [target.'cfg(target_os = "macos")'.dependencies]

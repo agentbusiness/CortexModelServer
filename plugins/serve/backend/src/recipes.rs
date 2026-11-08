@@ -151,6 +151,7 @@ fn convert(raw: Raw) -> Recipe {
             checkpoints: key("checkpoints"),
             kv_type: key("kv_type"),
             speculative: key("speculative"),
+            draft_max: key("draft_max"),
             idle_unload_s: key("idle_unload_s"),
             memory_limit: key("memory_limit"),
         },

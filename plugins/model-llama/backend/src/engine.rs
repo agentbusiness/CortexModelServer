@@ -639,10 +639,16 @@ impl Engine {
         if method == methods::SLOTS && self.borrowed().is_none() && self.server.try_lock().ok().is_some_and(|slot| slot.is_none()) {
             return to_value(&idle_slots(self.config.settings(self.spec()).parallel));
         }
+        // CortexModelServer patch: reading the slots is not a use of the model (the server reads
+        // every lane's all the time, and the lane would never go idle).
+        let last_request = (method == methods::SLOTS).then(|| *self.last_request.lock().unwrap_or_else(|p| p.into_inner()));
         let server = match self.target().await? {
             Target::Borrowed(lender) => return self.forward(&lender, method, params, items, &cancel).await,
             Target::Local(server) => server,
         };
+        if let Some(at) = last_request {
+            *self.last_request.lock().unwrap_or_else(|p| p.into_inner()) = at;
+        }
         match method {
             methods::CHAT => {
                 let params: ChatParams = parse_params(params)?;

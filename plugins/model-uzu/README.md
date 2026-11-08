@@ -249,6 +249,12 @@ after images, and prefill/encode latency end to end.
 Everything else is CortexCode's plugin unchanged. Each source change carries a
 `// CortexModelServer patch:` comment.
 
+Loading on demand (`src/runtime.rs`, `src/plugin.rs`): with `idle_unload_s` set (every lane has it),
+the model loads on its first real call and unloads after that many seconds without one. Its
+conversations are hibernated first and come back at the next load. `model.info`, `model.slots` and
+the self-test load nothing while the weights are on this computer. Without the key the plugin
+behaves as CortexCode's: it loads at start and stays.
+
 Names (user-facing text only): `plugin.toml` header comment, `backend/Cargo.toml` description,
 the settings panel's "restart CortexModelServer" (`ui/settings-model/src/engine.tsx`), the two
 `vite.config.mjs` header comments, this README's title. The binary stays `cc-model-uzu` (this

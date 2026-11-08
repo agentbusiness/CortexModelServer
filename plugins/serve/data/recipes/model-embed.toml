@@ -11,7 +11,7 @@ kind = "embed"
 family = "modernbert"
 tags = ["embed"]
 platforms = ["macos", "linux"]
-backends = ["metal", "cpu"]             # the knowledge app's ModernBERT has no CUDA path
+backends = ["metal", "cuda", "cpu"]     # CUDA: this plugin's addition (the knowledge app's ModernBERT has no CUDA path)
 repo = "hotchpotch/bekko-embedding-v1-a8m"
 revision = "c721113d59a1d91b447450324f51c4b3332c924a"
 # Files 246,317,545 bytes (present in ~/.cortex-models: 235 MiB). Resident: the bf16 token table

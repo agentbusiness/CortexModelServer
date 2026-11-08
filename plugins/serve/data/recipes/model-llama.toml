@@ -69,6 +69,7 @@ cache_ram = "cache_ram"          # MiB
 checkpoints = "checkpoints"
 kv_type = "kv_type"
 speculative = ""
+draft_max = "draft_max"
 idle_unload_s = "idle_unload_s"
 memory_limit = ""
 
@@ -79,7 +80,7 @@ engine = "model-llama"
 origin = "CortexTerm"
 kind = "chat"
 family = "gemma4"
-tags = ["office"]
+tags = ["smalloffice"]
 platforms = ["macos", "linux"]
 backends = ["metal", "cuda", "vulkan"]
 repo = "unsloth/gemma-4-E2B-it-qat-GGUF"
@@ -112,6 +113,7 @@ cache_ram = "cache_ram"
 checkpoints = "checkpoints"
 kv_type = "kv_type"
 speculative = ""
+draft_max = "draft_max"
 idle_unload_s = "idle_unload_s"
 memory_limit = ""
 
@@ -158,6 +160,7 @@ cache_ram = "cache_ram"
 checkpoints = "checkpoints"
 kv_type = "kv_type"
 speculative = ""
+draft_max = "draft_max"
 idle_unload_s = "idle_unload_s"
 memory_limit = ""
 
@@ -176,7 +179,7 @@ revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
 # UD-Q4_K_XL 17_559_178_144 + DFlash 2 drafter 1_143_006_816 (z-lab/Qwen3.8-27B-DFlash2-GGUF
 # @2d9571f8ce46e151f61c6499c99dee6079e1d610) + mmproj-F16 927_607_488 (on the GPU)
 weights_bytes = 19629792448
-compute_bytes = 1200000000        # DeltaNet state 2 x 157 MB + compute buffers (ubatch 512) + drafter cache (estimate)
+compute_bytes = 1650000000        # DeltaNet state 2 x 157 MB + compute buffers (ubatch 2048) + drafter cache (estimate)
 kv_bytes_per_token = 34816        # q8_0 (65536 at f16); per slot: KV = this * ctx * slots
 min_gpu_bytes = 24696061952       # 23 GiB (a 24 GB card), CortexCode's rule
 ctx_default = 32768
@@ -191,7 +194,7 @@ speculative = "dflash2"
 variant = "qwen3.8-27b-q4"
 ctx = 32768
 parallel = 2
-ubatch = 512
+ubatch = 2048                     # CortexModelServer: prompts read 4x as many tokens per step (CortexCode runs 512)
 kv_type = "q8_0"
 draft_max = 7
 
@@ -202,6 +205,7 @@ cache_ram = "cache_ram"          # MiB; unset = llama-server's default, as Corte
 checkpoints = "checkpoints"      # unset = llama-server's default
 kv_type = "kv_type"
 speculative = ""
+draft_max = "draft_max"
 idle_unload_s = "idle_unload_s"
 memory_limit = ""
 
@@ -220,7 +224,7 @@ revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
 # UD-Q3_K_XL 13_146_393_504 + DFlash 2 drafter 1_143_006_816; mmproj-F16 (927_607_488) stays in
 # host RAM (--no-mmproj-offload) and is not counted
 weights_bytes = 14289400320
-compute_bytes = 900000000         # DeltaNet state 2 x 157 MB + compute buffers (ubatch 512) + drafter cache (estimate)
+compute_bytes = 1350000000        # DeltaNet state 2 x 157 MB + compute buffers (ubatch 2048) + drafter cache (estimate)
 kv_bytes_per_token = 34816
 min_gpu_bytes = 16106127360       # 15 GiB (a 16 GB card), CortexCode's rule
 ctx_default = 32768
@@ -235,7 +239,7 @@ speculative = "dflash2"
 variant = "qwen3.8-27b-q3"
 ctx = 32768
 parallel = 2
-ubatch = 512
+ubatch = 2048                     # CortexModelServer: as the Q4 above (CortexCode runs 512)
 kv_type = "q8_0"
 draft_max = 7
 
@@ -246,5 +250,6 @@ cache_ram = "cache_ram"
 checkpoints = "checkpoints"
 kv_type = "kv_type"
 speculative = ""
+draft_max = "draft_max"
 idle_unload_s = "idle_unload_s"
 memory_limit = ""

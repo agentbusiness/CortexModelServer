@@ -253,10 +253,12 @@ impl Engine {
     pub fn info(&self) -> ModelInfo {
         let loaded = self.loaded.load(Ordering::SeqCst);
         let target = self.target.lock().map(|t| t.clone()).unwrap_or_default();
+        // CortexModelServer patch: the GPU is CUDA in the Linux build that has it.
+        let gpu = if cfg!(feature = "cuda") { "cuda" } else { "metal" };
         let backend = if loaded {
-            if target.ends_with("gpu") { "metal" } else { "cpu" }
-        } else if self.config.prefer_gpu && cfg!(target_os = "macos") {
-            "metal"
+            if target.ends_with("gpu") { gpu } else { "cpu" }
+        } else if self.config.prefer_gpu && (cfg!(target_os = "macos") || cfg!(feature = "cuda")) {
+            gpu
         } else {
             "cpu"
         };

@@ -10,7 +10,7 @@ kind = "extract"
 family = "gliner-relex"
 tags = ["bilstm"]
 platforms = ["macos", "linux"]
-backends = ["metal", "cuda", "cpu"]     # cuda only in a build with `--features cuda`
+backends = ["metal", "cuda", "cpu"]     # on Linux the package carries a CUDA build, used where NVIDIA's driver is
 repo = "knowledgator/gliner-relex-large-v1.0"
 revision = "4aedc9226a5ac9e2f6b5ea3e91c1ee577c88a290"
 # Files 1,875,022,429 bytes (present in ~/.cortex-models: 1.83 GiB). Resident: the encoder's 434 M

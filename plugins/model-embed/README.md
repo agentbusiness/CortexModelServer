@@ -7,7 +7,7 @@ vectors (`model.embed`). Swap policy: drain first. The model card tags it `embed
 
 | `model` | repository @ revision | runtime | dims |
 |---|---|---|---|
-| `bekko-embedding-v1-a8m` | `hotchpotch/bekko-embedding-v1-a8m@c721113d59a1d91b447450324f51c4b3332c924a` | ModernBERT on candle 0.10.2: Metal on macOS (`prefer_gpu`), else the CPU | 384 |
+| `bekko-embedding-v1-a8m` | `hotchpotch/bekko-embedding-v1-a8m@c721113d59a1d91b447450324f51c4b3332c924a` | ModernBERT on candle 0.10.2: Metal on macOS, CUDA on Linux where NVIDIA's driver is (`prefer_gpu`), else the CPU | 384 |
 
 It mean-pools the token states over the attention mask and L2-normalizes. At most 512 tokens are
 read per text.
@@ -44,6 +44,9 @@ Written here so the copied files compile with no change but the renames below:
 
 ## CortexModelServer changes
 
+Loading on demand (`backend/src/main.rs`, a marked patch): a lane's self-test does not load the model
+when its weights are here.
+
 The copied files (`backend/src/embedding/**`, and what `embed-common/` and `src/shared_models.rs`
 copy) differ from the knowledge app's only by renames of names that carry that app's own name,
 which this repository keeps out:
@@ -56,7 +59,18 @@ which this repository keeps out:
 - in the ONNX loader (not compiled), the default Hugging Face cache is `~/.cache/huggingface/hub`
   (the origin uses a folder under its own home), and the doc examples name `crate::embedding`.
 
+One patch beyond the renames: `modernbert/select_device.rs` also tries CUDA in a build with the
+`cuda` feature (marked `CortexModelServer patch`; the origin has only a Metal path). If the GPU cannot
+load or run the encoder, `from_files` falls back to the CPU as it does for Metal.
+
 A `diff -r` against the knowledge app's folder shows those lines and nothing else.
+
+The Linux package carries that CUDA build. candle links NVIDIA's libraries at build time, so a CUDA
+executable does not start without the driver. `backend/build.sh` builds the plain executable and, on
+Linux, a second one with `--features cuda` in `cuda/`. The plain one becomes the CUDA one
+(`become_cuda_build` in `src/main.rs`) when `libcuda.so.1` loads and an installed model-llama package
+holds NVIDIA's libraries, which it ships for llama-server (so the Linux release carries them once).
+Otherwise it stays on the CPU.
 
 ## Methods
 

@@ -92,6 +92,10 @@ async fn dispatch(runtime: Arc<Runtime>, call: Call) -> Result<Value, RpcError> 
     let Call { method, params, items, cancel } = call;
     match method.as_str() {
         methods::INFO => {
+            // CortexModelServer patch: the mesh card asks every lane; asking loads nothing.
+            if runtime.on_demand() {
+                return to_value(&runtime.info_without_loading()?);
+            }
             let loaded = runtime.ready().await?;
             to_value(&runtime.info(&loaded))
         }
@@ -146,6 +150,11 @@ fn check(name: &str, started: Instant, outcome: Result<String, String>) -> Probe
 async fn probe(runtime: Arc<Runtime>) -> ProbeReport {
     let mut checks = Vec::new();
     let started = Instant::now();
+    // CortexModelServer patch: an on-demand model that is here is not loaded for the self-test.
+    if runtime.on_demand() && runtime.installed() {
+        checks.push(check("model installed", started, Ok("loads on its first call".to_owned())));
+        return ProbeReport::from_checks(checks);
+    }
     // A model being downloaded (a first start) is the plugin working, not failing: the check says
     // how far it is, and the generation check follows once it has loaded.
     match runtime.installing_or_ready().await {

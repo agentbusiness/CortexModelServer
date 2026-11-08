@@ -103,6 +103,10 @@ async fn probe(engine: Arc<Engine>) -> ProbeReport {
         };
         return ProbeReport::from_checks(vec![check("model installing", started, Ok(detail))]);
     }
+    // CortexModelServer patch: a lane loads its model on the first real call, not for the self-test.
+    if std::env::var_os("CORTEX_LANE").is_some() {
+        return ProbeReport::from_checks(vec![check("model installed", started, Ok("loads on its first call".to_owned()))]);
+    }
     let params = json!({
         "messages": [{"role": "user", "content": "What is 17 + 25? Reply with only the number."}],
         "sampling": {"temperature": 0.0, "seed": 1},

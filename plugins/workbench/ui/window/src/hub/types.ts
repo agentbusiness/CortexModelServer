@@ -119,9 +119,21 @@ export interface Calibration {
   ttft_ms: number;
   at_ms: number;
   error?: string;
+  sweep?: { slots: number; tok_s: number }[];
+  best_slots?: number;
+  together_tok_s?: number;
+  current_slots?: number;
+  sweep_note?: string;
+  kind?: string;
+  drafts?: { label: string; tok_s: number }[];
+  best_draft?: string;
+  ctx?: number;
+  moved_to?: number;
 }
 
-export interface CalibrationResult { results: Calibration[] }
+export interface GpuShare { gpu: number; kept: number; error?: string }
+
+export interface CalibrationResult { results: Calibration[]; gpus?: GpuShare[] }
 
 export interface Engine { id: string; version: string; enabled: boolean }
 export interface Want { app: string; model_id: string; family: string; tags: string[]; recipe?: string; loaded?: boolean }

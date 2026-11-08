@@ -18,7 +18,7 @@ its own `CORTEX_PLUGIN_DATA`, `CORTEX_LANE=<lane id>`, and on Linux `CUDA_VISIBL
 | `gemma-4-e4b-qat` | CortexTerm / the knowledge app's office lane | unsloth/gemma-4-E4B-it-qat-GGUF@8c5a9e4 UD-Q4_K_XL + MTP head | ctx 32768 (one unified pool), 2 slots, ubatch 2048, f16, MTP 4, checkpoints 2 (min step 2048), cache-ram 1024, cache-reuse 0, no context shift |
 | `gemma-4-e2b-qat` | CortexTerm | unsloth/gemma-4-E2B-it-qat-GGUF@66a399f UD-Q4_K_XL + MTP head | as E4B |
 | `gemma-4-e4b-qat-report` | the knowledge app's report lane | the E4B files | as E4B, but ctx 131072, 1 slot, answers capped at 16384 tokens, greedy, thinking per request |
-| `qwen3.8-27b-q4` | CortexCode (Linux) | unsloth/Qwen3.8-27B-GGUF@4ca7207 UD-Q4_K_XL + mmproj-F16, z-lab/Qwen3.8-27B-DFlash2-GGUF@2d9571f Q4_K_M | ctx 32768 per slot, 2 slots, ubatch 512, q8_0 with flash attention (f16 fallback), `draft-dflash` at most 7, projector on the GPU, llama-server's own checkpoint and cache-ram defaults |
+| `qwen3.8-27b-q4` | CortexCode (Linux) | unsloth/Qwen3.8-27B-GGUF@4ca7207 UD-Q4_K_XL + mmproj-F16, z-lab/Qwen3.8-27B-DFlash2-GGUF@2d9571f Q4_K_M | ctx 32768 per slot, 2 slots, ubatch 2048 (CortexCode runs 512), q8_0 with flash attention (f16 fallback), `draft-dflash` at most 7, projector on the GPU, llama-server's own checkpoint and cache-ram defaults |
 | `qwen3.8-27b-q3` | CortexCode (Linux) | as Q4 with UD-Q3_K_XL | as Q4, projector on the CPU (`--no-mmproj-offload`) |
 
 `variant = ""` still picks E4B above 8 GiB and E2B otherwise, as in CortexTerm.
@@ -27,6 +27,12 @@ its own `CORTEX_PLUGIN_DATA`, `CORTEX_LANE=<lane id>`, and on Linux `CUDA_VISIBL
 
 Every site is marked `CortexModelServer patch:` in the source.
 
+- **Loading on demand** (`backend/src/main.rs`, `backend/src/engine.rs`): a lane's self-test does
+  not load the model when its weights are here, and reading `model.slots` does not count as a use,
+  so an idle lane unloads.
+- **NVIDIA's libraries for the other engines** (`backend/build.sh`): the Linux package also carries
+  `libcurand`, which model-relex's and model-embed's CUDA builds link. They use this
+  package's copy of all of NVIDIA's libraries, so the release carries them once.
 - **Per-variant settings** (`backend/src/config.rs`, `backend/src/catalog.rs` `Defaults`, `plugin.toml`
   `[backend.config]`): `ctx`, `parallel`, `ubatch`, `kv_type`, `draft_max`, `cache_ram`,
   `checkpoints`, `max_tokens`, `greedy` are optional in the config; a given value wins, otherwise the

@@ -15,7 +15,18 @@ pub(super) fn select_device(prefer_gpu: bool) -> Device {
             }
         }
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = prefer_gpu;
+    // CortexModelServer patch: CUDA in the Linux build that has it (the knowledge app has no CUDA
+    // path; was `let _ = prefer_gpu` off macOS). `from_files` falls back to the CPU as for Metal.
+    if prefer_gpu && cfg!(feature = "cuda") {
+        match Device::new_cuda(0) {
+            Ok(device) => return device,
+            Err(error) => {
+                embed_common::embed_warn!(
+                    "CUDA is unavailable for the semantic encoder: {}; running it on the CPU",
+                    error
+                );
+            }
+        }
+    }
     Device::Cpu
 }

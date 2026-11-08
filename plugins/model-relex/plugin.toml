@@ -4,7 +4,7 @@
 id = "model-relex"
 name = "Model (GLiNER-relex extractor)"
 version = "0.1.0"
-description = "GLiNER-relex large (knowledgator/gliner-relex-large-v1.0) on candle, the knowledge app's relex lane copied as is: one encoder pass gives a passage's entities and the relations between them (model.extract). Metal on macOS, CUDA when built with it, else the CPU; encoder f16, heads f32, BiLSTM on the CPU; 768-subtoken windows."
+description = "GLiNER-relex large (knowledgator/gliner-relex-large-v1.0) on candle, the knowledge app's relex lane copied as is: one encoder pass gives a passage's entities and the relations between them (model.extract). Metal on macOS, CUDA on Linux where NVIDIA's driver is, else the CPU; encoder f16, heads f32, BiLSTM on the CPU; 768-subtoken windows."
 license = "UNLICENSED"
 platforms = ["macos", "linux"]
 
@@ -15,8 +15,10 @@ platforms = ["macos", "linux"]
 category = "model"
 contract = "model@1"
 dir = "backend"
-build = ["cargo", "build", "--release"]
+build = ["sh", "build.sh"]
 exec = "backend/target/release/cc-model-relex"
+# On Linux the CUDA build, which uses the NVIDIA libraries in model-llama's package (empty on macOS).
+assets = ["backend/target/release/cuda"]
 swap = "drain_first"
 hello_timeout_ms = 60000
 # A first start may download the model (1.9 GB) and loading compiles the Metal kernels (8-13 s).

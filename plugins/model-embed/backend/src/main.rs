@@ -66,6 +66,10 @@ async fn probe(engine: Arc<Engine>) -> ProbeReport {
         }
         return ProbeReport::from_checks(vec![check("model installing", started, Ok(if stage.is_empty() { "installing".into() } else { stage }))]);
     }
+    // CortexModelServer patch: a lane loads its model on the first real call, not for the self-test.
+    if std::env::var_os("CORTEX_LANE").is_some() {
+        return ProbeReport::from_checks(vec![check("model installed", started, Ok("loads on its first call".to_owned()))]);
+    }
     let params = json!({"texts": ["The cat sits on the mat.", "A cat is sitting on a rug.", "Quarterly revenue rose by four percent."]});
     let outcome = match engine.dispatch(methods::EMBED, params, CancellationToken::new()).await {
         Ok(answer) => {
@@ -152,7 +156,44 @@ async fn call_once(args: &[String]) -> i32 {
     code
 }
 
+/// CortexModelServer patch: the folder of NVIDIA's libraries, in the installed model-llama package
+/// (`plugins/model-llama/<version>/backend/llama`) that has every library the CUDA build links.
+fn cuda_libraries() -> Option<std::path::PathBuf> {
+    const NEEDED: [&str; 4] = ["libcudart.so", "libcublas.so", "libcublasLt.so", "libcurand.so"];
+    let exe = std::env::current_exe().ok()?;
+    let plugins = exe.ancestors().nth(4)?;
+    let holds_all = |dir: &std::path::PathBuf| {
+        let names: Vec<String> = std::fs::read_dir(dir).into_iter().flatten().flatten().map(|file| file.file_name().to_string_lossy().into_owned()).collect();
+        NEEDED.iter().all(|lib| names.iter().any(|name| name.starts_with(&format!("{lib}."))))
+    };
+    std::fs::read_dir(plugins.join("model-llama")).ok()?.flatten().map(|version| version.path().join("backend/llama")).filter(holds_all).max()
+}
+
+/// CortexModelServer patch: become the package's CUDA build (`cuda/` beside this executable, Linux
+/// only, see build.sh) when NVIDIA's driver and libraries are here. Otherwise this build runs, on
+/// the CPU: the CUDA build would not even start.
+fn become_cuda_build() {
+    use std::os::unix::process::CommandExt;
+    unsafe extern "C" {
+        fn dlopen(file: *const std::ffi::c_char, mode: std::ffi::c_int) -> *mut std::ffi::c_void;
+    }
+    const RTLD_LAZY: std::ffi::c_int = 1;
+    if !cfg!(target_os = "linux") || cfg!(feature = "cuda") {
+        return;
+    }
+    // SAFETY: a constant library name; the handle is kept for the life of the process.
+    if unsafe { dlopen(c"libcuda.so.1".as_ptr(), RTLD_LAZY) }.is_null() {
+        return;
+    }
+    let Some(build) = std::env::current_exe().ok().map(|exe| exe.with_file_name("cuda").join(env!("CARGO_BIN_NAME"))).filter(|path| path.is_file()) else { return };
+    let Some(libraries) = cuda_libraries() else { return };
+    let path = std::env::join_paths(std::iter::once(libraries).chain(std::env::var_os("LD_LIBRARY_PATH").iter().flat_map(std::env::split_paths))).unwrap_or_default();
+    let error = std::process::Command::new(&build).args(std::env::args_os().skip(1)).env("LD_LIBRARY_PATH", path).exec();
+    eprintln!("cannot start {}: {error}; running on the CPU", build.display());
+}
+
 fn main() {
+    become_cuda_build();
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_env("CORTEX_LOG").unwrap_or_else(|_| "info".into()))

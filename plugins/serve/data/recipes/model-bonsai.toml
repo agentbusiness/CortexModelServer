@@ -17,7 +17,8 @@
 #
 # Lane keys: ctx_total may only shrink the fitted pool (the CortexModelServer patch in engine.rs);
 # slots caps resident conversations (1..fitted) but does not shrink what is allocated; KV type
-# (q8_0), checkpoints (fitted) and drafting (by variant) are fixed; there is no idle unload.
+# (q8_0), checkpoints (fitted) and drafting (by variant) are fixed; idle_unload_s loads the model on
+# its first call and unloads it after this long without one (the CortexModelServer patch in runtime.rs).
 
 [[recipe]]
 id = "ternary-bonsai2-27b-mtp-bonsai"
@@ -55,7 +56,7 @@ cache_ram = ""
 checkpoints = ""
 kv_type = ""
 speculative = ""
-idle_unload_s = ""
+idle_unload_s = "idle_unload_s"
 memory_limit = "memory_limit_bytes"
 
 [[recipe]]
@@ -94,5 +95,5 @@ cache_ram = ""
 checkpoints = ""
 kv_type = ""
 speculative = ""
-idle_unload_s = ""
+idle_unload_s = "idle_unload_s"
 memory_limit = "memory_limit_bytes"

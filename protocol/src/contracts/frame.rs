@@ -1317,6 +1317,9 @@ pub struct LaneSpec {
     pub config: Value,
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+    /// CortexModelServer: the GPU it runs on. Other work on that GPU waits for a person's call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<u32>,
 }
 
 /// [`methods::LANES_SET`] parameters: every lane this computer runs.

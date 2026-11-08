@@ -103,6 +103,9 @@ pub struct Mesh {
     pub ctx: OnceLock<Ctx>,
     pairing: Mutex<Option<Pending>>,
     pub borrows: Mutex<HashMap<String, Borrow>>,
+    /// This app's models another app on this computer runs for it now, by their plugin
+    /// ([`crate::handover`]).
+    pub handed: Mutex<std::collections::BTreeMap<String, cc_protocol::contracts::mesh::UsedModel>>,
     event_subs: Mutex<Vec<EventSub>>,
     pub placements: crate::place::Placements,
     pub links: crate::projects::Links,
@@ -167,6 +170,7 @@ impl Mesh {
             ctx: OnceLock::new(),
             pairing: Mutex::new(None),
             borrows: Mutex::new(HashMap::new()),
+            handed: Mutex::new(std::collections::BTreeMap::new()),
             event_subs: Mutex::new(Vec::new()),
             placements: crate::place::Placements::default(),
             links: crate::projects::Links::default(),
@@ -617,6 +621,7 @@ impl Mesh {
                     crate::card::refresh_load(ctx, model).await;
                 }
             }
+            self.apply_handover(&mut card);
             if !self.lends() {
                 card.models.clear();
             }
@@ -624,10 +629,11 @@ impl Mesh {
         }
         let card = match self.ctx.get() {
             Some(ctx) => crate::card::build(ctx, &self.me.hex(), &self.name(), &self.home).await,
-            None => Card { node: self.me.hex(), name: self.name(), software: crate::SOFTWARE.to_owned(), version: env!("CARGO_PKG_VERSION").to_owned(), updated_ms: now_ms(), ..Card::default() },
+            None => Card { node: self.me.hex(), name: self.name(), software: crate::SOFTWARE.to_owned(), sharing_priority: Some(crate::SHARING_PRIORITY), version: env!("CARGO_PKG_VERSION").to_owned(), updated_ms: now_ms(), ..Card::default() },
         };
         let mut card = card;
         card.services = Self::service_cards(&self.local_shares().await);
+        self.apply_handover(&mut card);
         // A model this computer does not lend is not shown to the members.
         if !self.lends() {
             card.models.clear();

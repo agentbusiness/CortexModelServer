@@ -14,7 +14,7 @@ import { Menu, errorMessage, runtimeFor, type MenuItem } from '@cortex/sdk';
 import { CardModels, gpuTitle } from './Grid';
 import { CONTEXTS, ctxLabel, gb, gbWhole, laneTone, TONE_LABEL, tokS } from './format';
 import { serveOf, useServe } from './serve-data';
-import type { Calibration, CalibrationResult, Computer, Fit, Gpu, LaneSettings, LaneView, LanesView, Plan, Recipe } from './types';
+import type { Calibration, CalibrationResult, Computer, Fit, Gpu, GpuShare, LaneSettings, LaneView, LanesView, Plan, Recipe } from './types';
 
 interface Staged {
   key: string;
@@ -56,6 +56,7 @@ export function Editor({ computer }: { computer: Computer }) {
   const [plan, setPlan] = useState<Plan | null>(null);
   const [planBusy, setPlanBusy] = useState(false);
   const [calibration, setCalibration] = useState<Calibration[] | null>(null);
+  const [gpuShares, setGpuShares] = useState<GpuShare[]>([]);
   const [calibrating, setCalibrating] = useState(false);
   const [adding, setAdding] = useState<{ recipe: string; fits: Record<number, Fit | string> } | null>(null);
 
@@ -157,8 +158,9 @@ export function Editor({ computer }: { computer: Computer }) {
     setCalibrating(true);
     setProblem(null);
     try {
-      const result = await client.call<CalibrationResult>('serve.calibrate.run', { lane: '' }, { signal: AbortSignal.timeout(900_000) });
+      const result = await client.call<CalibrationResult>('serve.calibrate.run', { lane: '' }, { signal: AbortSignal.timeout(7_200_000) });
       setCalibration(result?.results ?? []);
+      setGpuShares(result?.gpus ?? []);
     } catch (cause) { setProblem(`Calibration failed: ${errorMessage(cause)}`); }
     setCalibrating(false);
   };
@@ -251,11 +253,12 @@ export function Editor({ computer }: { computer: Computer }) {
 
       {calibration && <section className="cms-ed-panel" aria-label="Calibration">
         <div className="cms-ed-panel-head"><span className="ct-label">CALIBRATION</span><span className="grow" /><button type="button" className="ct-x" aria-label="Close calibration" onClick={() => setCalibration(null)}>×</button></div>
-        {calibration.length === 0 && <p className="ct-hint">No chat lane to measure.</p>}
+        {calibration.length === 0 && <p className="ct-hint">No lane to measure.</p>}
         {calibration.length > 0 && <div className="cms-cal">
-          <span className="ct-label ct-faint">LANE</span><span className="ct-label ct-faint">DECODE</span><span className="ct-label ct-faint">PREFILL</span><span className="ct-label ct-faint">ALL SLOTS</span><span className="ct-label ct-faint">TTFT</span>
+          <span className="ct-label ct-faint">LANE</span><span className="ct-label ct-faint">DECODE</span><span className="ct-label ct-faint">PREFILL</span><span className="ct-label ct-faint">ALL SLOTS</span><span className="ct-label ct-faint">TTFT</span><span className="ct-label ct-faint">TOGETHER</span><span className="ct-label ct-faint">BEST SLOTS</span><span className="ct-label ct-faint">DRAFT</span>
           {calibration.map((result) => <CalRow key={result.lane} result={result} name={liveOf(result.lane)?.name ?? recipeOf(result.recipe)?.name ?? result.lane} />)}
         </div>}
+        {gpuShares.map((share) => <p key={share.gpu} className={share.error ? 'inline-error' : 'ct-hint'}>GPU {share.gpu}, all lanes busy at once: {share.error || `${Math.round(share.kept * 100)}% of their best alone gets done (100% is a GPU that only takes turns; below it, they get in each other's way)`}</p>)}
       </section>}
 
       <section className="cms-ed-lanes" aria-label="Lanes">
@@ -329,12 +332,21 @@ function MemoryBar({ gpu, count, rows }: { gpu: Gpu; count: number; rows: { fit?
 
 function CalRow({ result, name }: { result: Calibration; name: string }) {
   if (result.error) return <><span className="cms-cal-name">{name}</span><span className="cms-cal-error inline-error">{result.error}</span></>;
+  const sweep = result.sweep ?? [];
+  const measured = sweep.map((load) => `${load.slots} slots: ${tokS(load.tok_s)} tok/s`).join('\n');
+  const hint = [measured, result.ctx ? `Context ${ctxLabel(result.ctx)}` : '', result.moved_to === undefined ? '' : `Moved to GPU ${result.moved_to}`, result.sweep_note ? `Stopped at ${result.sweep_note}` : ''].filter(Boolean).join('\n');
+  const draftHint = (result.drafts ?? []).map((load) => `${load.label}: ${tokS(load.tok_s)} tok/s`).join('\n');
+  const chat = (result.kind ?? 'chat') === 'chat';
+  const best = result.best_slots ?? 0;
   return <>
     <span className="cms-cal-name">{name}</span>
-    <span className="cms-num">{tokS(result.decode_tok_s)}</span>
-    <span className="cms-num">{tokS(result.prefill_tok_s)}</span>
+    <span className="cms-num">{chat ? tokS(result.decode_tok_s) : '-'}</span>
+    <span className="cms-num">{chat ? tokS(result.prefill_tok_s) : '-'}</span>
     <span className="cms-num">{tokS(result.aggregate_tok_s)}</span>
-    <span className="cms-num">{Math.round(result.ttft_ms)} ms</span>
+    <span className="cms-num">{chat ? `${Math.round(result.ttft_ms)} ms` : '-'}</span>
+    <span className="cms-num">{result.together_tok_s ? tokS(result.together_tok_s) : '-'}</span>
+    <span className="cms-num" title={hint}>{best === result.current_slots ? best : `${best}, now ${result.current_slots ?? 0}`}{result.moved_to === undefined ? '' : ` → GPU ${result.moved_to}`}</span>
+    <span className="cms-num" title={draftHint}>{result.best_draft || '-'}</span>
   </>;
 }
 

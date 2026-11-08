@@ -348,7 +348,8 @@ impl Engine {
             variant: spec.id.into(),
             path: dir.join(spec.weights.name).display().to_string(),
             family: "gemma4".into(),
-            tags: vec![tags::OFFICE.into()],
+            // CortexModelServer patch: the 26B is lent under its own tag, so a call gets the model it selected.
+            tags: vec![if spec.tier == "26b-a4b" { tags::LARGE_OFFICE } else { tags::OFFICE }.into()],
             quant: spec.quant.into(),
             file_bytes: spec.weights.bytes,
             ctx_total: server.map_or(self.config.ctx, |s| s.launch.context_tokens),
@@ -465,7 +466,13 @@ impl Engine {
         if method == methods::SLOTS && self.server.try_lock().ok().is_some_and(|slot| slot.is_none()) {
             return to_value(&idle_slots(u32::from(self.config.slots)));
         }
+        // CortexModelServer patch: reading the slots is not a use of the model (the server reads
+        // every lane's all the time, and the lane would never go idle).
+        let last_request = (method == methods::SLOTS).then(|| *self.last_request.lock().unwrap_or_else(|p| p.into_inner()));
         let server = self.local().await?;
+        if let Some(at) = last_request {
+            *self.last_request.lock().unwrap_or_else(|p| p.into_inner()) = at;
+        }
         match method {
             methods::CHAT => {
                 let params: ChatParams = parse_params(params)?;

@@ -1102,18 +1102,24 @@ async function models(words, options) {
 async function calibrate(words, options) {
   const t = await target(options);
   const lane = words[0] ? findLane((await call(t, 'serve.lanes.list', {})).lanes, words[0]).settings.id : '';
-  if (!options.json) say(`calibrating ${lane || 'every chat lane'}${where(t)}: each lane is measured alone and with every slot busy (this takes a while)`);
+  if (!options.json) say(`calibrating ${lane || 'every chat lane'}${where(t)}: each lane is measured alone and reloaded at each slot count and drafting setting, then each GPU's lanes run at once, and a full run applies what it finds (calls in progress finish first, this takes a while)`);
   const result = await call(t, 'serve.calibrate.run', { lane });
   if (options.json) return json(result);
   table(result.results, [
     ['LANE', (row) => row.lane],
     ['RECIPE', (row) => row.recipe],
-    ['DECODE', (row) => (row.error ? '-' : `${num(row.decode_tok_s)} tok/s`)],
-    ['PREFILL', (row) => (row.error ? '-' : `${num(row.prefill_tok_s, 0)} tok/s`)],
+    ['DECODE', (row) => (row.error || row.kind !== 'chat' ? '-' : `${num(row.decode_tok_s)} tok/s`)],
+    ['PREFILL', (row) => (row.error || row.kind !== 'chat' ? '-' : `${num(row.prefill_tok_s, 0)} tok/s`)],
     ['ALL SLOTS', (row) => (row.error ? '-' : `${num(row.aggregate_tok_s)} tok/s`)],
-    ['FIRST TOKEN', (row) => (row.error ? '-' : `${Math.round(row.ttft_ms)} ms`)],
-    ['ERROR', (row) => row.error || ''],
+    ['FIRST TOKEN', (row) => (row.error || row.kind !== 'chat' ? '-' : `${Math.round(row.ttft_ms)} ms`)],
+    ['TOGETHER', (row) => (row.together_tok_s ? `${num(row.together_tok_s)} tok/s` : '-')],
+    ['BEST SLOTS', (row) => (row.error ? '-' : (row.best_slots === row.current_slots ? `${row.best_slots}` : `${row.best_slots}, now ${row.current_slots}`))],
+    ['DRAFT', (row) => row.best_draft || '-'],
+    ['MOVED', (row) => (row.moved_to === undefined ? '' : `GPU ${row.moved_to}`)],
+    ['TOTAL BY SLOTS', (row) => (row.error ? '-' : row.sweep.map((load) => `${load.slots}: ${num(load.tok_s)}`).join('  '))],
+    ['ERROR', (row) => row.error || row.sweep_note || ''],
   ]);
+  for (const share of result.gpus ?? []) out(`GPU ${share.gpu}, all lanes busy at once: ${share.error || `${Math.round(share.kept * 100)}% of their best alone gets done`}`);
   if (!result.results.length) out('no chat lanes to calibrate');
   return 0;
 }
@@ -1288,7 +1294,7 @@ Every day                                      (each takes --on <server> and --j
   cortexmodelserver lane remove <lane>
   cortexmodelserver models [list]              downloaded models
   cortexmodelserver models remove <recipe> [--yes]
-  cortexmodelserver calibrate [<lane>]         measure decode, prefill and all-slots throughput
+  cortexmodelserver calibrate [<lane>]         measure every lane and, for all lanes, apply the best slots and drafting
 `;
 
 const COMMANDS = { status, cluster, peers, recipes, plan, lane, lanes: lane, models, calibrate };

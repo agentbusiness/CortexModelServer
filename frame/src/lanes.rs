@@ -17,7 +17,63 @@ use cc_protocol::contracts::frame::{LaneSpec, LaneState, LanesResult, LanesSetPa
 use cc_protocol::{RpcError, to_value};
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::collections::HashMap;
 use std::time::Duration;
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
+/// How long other work waits for a person's call on another lane of its GPU: it is never starved.
+const LONGEST_WAIT: Duration = Duration::from_secs(30);
+
+type Persons = HashMap<(u32, String), u32>;
+
+/// CortexModelServer: who goes first on a GPU several lanes share. Each engine already puts a
+/// person's request before other work inside its lane; this is the same rule across lanes. New
+/// calls wait, and calls already running finish.
+pub struct GpuLine {
+    persons: Arc<watch::Sender<Persons>>,
+}
+
+/// A person's call in progress; dropped when it ends.
+pub struct PersonCall {
+    persons: Arc<watch::Sender<Persons>>,
+    key: (u32, String),
+}
+
+impl Drop for PersonCall {
+    fn drop(&mut self) {
+        self.persons.send_modify(|persons| {
+            if let Some(calls) = persons.get_mut(&self.key) {
+                *calls = calls.saturating_sub(1);
+                if *calls == 0 {
+                    persons.remove(&self.key);
+                }
+            }
+        });
+    }
+}
+
+impl GpuLine {
+    pub fn new() -> Self {
+        Self { persons: Arc::new(watch::channel(Persons::new()).0) }
+    }
+
+    pub fn person(&self, gpu: u32, lane: &str) -> PersonCall {
+        let key = (gpu, lane.to_owned());
+        self.persons.send_modify(|persons| *persons.entry(key.clone()).or_default() += 1);
+        PersonCall { persons: self.persons.clone(), key }
+    }
+
+    /// Wait while a person's call runs on another lane of this GPU.
+    pub async fn wait_turn(&self, gpu: u32, lane: &str, cancel: &CancellationToken) {
+        let mut persons = self.persons.subscribe();
+        let free = persons.wait_for(|persons| !persons.keys().any(|(on, other)| *on == gpu && other != lane));
+        tokio::select! {
+            _ = tokio::time::timeout(LONGEST_WAIT, free) => {}
+            _ = cancel.cancelled() => {}
+        }
+    }
+}
 
 /// `frame.lanes.set`: run exactly these lanes.
 pub async fn set(frame: &Arc<Frame>, params: LanesSetParams) -> Result<LanesResult, RpcError> {

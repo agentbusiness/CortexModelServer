@@ -158,7 +158,7 @@ pub const E2B: Spec = Spec {
     mmproj: None,
     mmproj_on_gpu: false,
     family: "gemma4",
-    tag: "office",
+    tag: "smalloffice",
     ctx_native: 131_072,
 };
 
@@ -188,14 +188,15 @@ pub const E4B_REPORT: Spec = Spec {
 
 // CortexModelServer patch: CortexCode's Linux Qwen (its `plugins/model-llama`, catalog.rs and
 // config.rs there): unsloth UD quants with the F16 vision projector, z-lab's DFlash 2 drafter at
-// most 7 tokens ahead, 2 slots of 32k each, ubatch 512, q8_0 KV with flash attention.
+// most 7 tokens ahead, 2 slots of 32k each, q8_0 KV with flash attention. ubatch 2048 (CortexCode
+// runs 512): prompts are read in larger steps, as for Gemma.
 const QWEN_REPO: &str = "unsloth/Qwen3.8-27B-GGUF";
 const QWEN_REVISION: &str = "4ca720788d1e01f1bff70c033e0d0028fd02e502";
 
 const QWEN: Defaults = Defaults {
     ctx: 32768,
     parallel: 2,
-    ubatch: 512,
+    ubatch: 2048,
     kv_type: "q8_0",
     draft_max: 7,
     cache_ram: None,

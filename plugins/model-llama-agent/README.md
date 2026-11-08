@@ -107,11 +107,17 @@ ct's `borrow` (using a member's model through the mesh) is removed: a lane never
 
 ## CortexModelServer changes (differences from CortexAgent)
 
+Loading on demand (`backend/src/main.rs`, `backend/src/engine.rs`): a lane's self-test does not load
+the model when its weights are here, and reading `model.slots` does not count as a use, so an idle
+lane unloads.
+
 Resynced with CortexAgent on 2026-11-07 (its vendored llama.cpp, `crates/llama-engine/native` and
 `crates/model`, uncommitted on top of `3fe5411`). The catalog, the fit arithmetic and the arguments
 are CortexAgent's unchanged. What differs is lane plumbing or a marked patch
 (`// CortexModelServer patch:`):
 
+- `model.info` tags the 26B-A4B `largeoffice` and the E4B `office`; `chat_body` carries
+  `ChatMessage.open_prefix` as `continue_final_message` (a standard change, in every app).
 - Engine host: llama-server over loopback HTTP instead of CortexAgent's in-process `gc_engine`
   (`agent-server/`, see Engine): the HTTP layer (`server-http.cpp`, cpp-httplib, the empty UI
   table), the model alias, and the read-only routes `/v1/models`, `/models`, `/props`, `/metrics`.

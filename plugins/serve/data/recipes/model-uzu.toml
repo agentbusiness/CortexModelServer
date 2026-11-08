@@ -28,8 +28,10 @@
 # - speculative -> speculative (auto | off; only the 27B has a drafter).
 # - Not settable: kv type (uzu picks int8 or bf16 per chip), checkpoints (fitted), the prompt cache in
 #   RAM (there is none: idle conversations spill to <plugin data>/hibernated/<pid>/, bounded by
-#   hibernate_limit_bytes, default 32 GiB of disk per lane), idle unload of the model (there is none;
-#   vision_idle_unload_s, default 300, unloads only the vision tower).
+#   hibernate_limit_bytes, default 32 GiB of disk per lane).
+# - idle_unload_s -> idle_unload_s (CortexModelServer patch in runtime.rs): the model loads on its
+#   first call and unloads after this long without one; vision_idle_unload_s (default 300) still
+#   unloads the vision tower on its own.
 #
 # Lanes need nothing else to be told apart: each instance's spill files live in its own plugin data
 # folder, the weights in ~/.cortex-models are shared read-only (downloads hold the revision folder's
@@ -72,7 +74,7 @@ cache_ram = ""
 checkpoints = ""
 kv_type = ""
 speculative = "speculative"
-idle_unload_s = ""
+idle_unload_s = "idle_unload_s"
 memory_limit = "memory_limit_bytes"
 
 [[recipe]]
@@ -112,7 +114,7 @@ cache_ram = ""
 checkpoints = ""
 kv_type = ""
 speculative = ""
-idle_unload_s = ""
+idle_unload_s = "idle_unload_s"
 memory_limit = "memory_limit_bytes"
 
 [[recipe]]
@@ -137,7 +139,10 @@ compute_bytes = 3221225472         # COMPUTE_RESERVE 3 GiB
 kv_bytes_per_token = 6336          # int8: 6 attention layers x 8 KV heads x 64 (10 short-convolution layers hold no KV); bf16 chips: 12,288
 min_gpu_bytes = 8589934592         # 8 GiB Macs fit weights + 3 GiB + several 32k conversations
 ctx_min_per_slot = 33792
-ctx_default = 33792                # pool: 1 conversation of 32,768 + 1,024 suffix rows (no recurrent state is charged)
+# CortexModelServer: the pool also holds the 24 prefix snapshots, which the knowledge app keeps outside
+# any pool. 8 conversations' room (1.7 GB) keeps all 24 for prefixes of several thousand tokens;
+# on a smaller Mac the plan halves it, down to one conversation's 33,792.
+ctx_default = 270336
 ctx_max = 270336                   # 8 conversations of 33,792; one conversation never exceeds 32,768
 slots_default = 1
 slots_max = 8
@@ -154,5 +159,5 @@ cache_ram = ""
 checkpoints = ""
 kv_type = ""
 speculative = ""
-idle_unload_s = ""
+idle_unload_s = "idle_unload_s"
 memory_limit = "memory_limit_bytes"

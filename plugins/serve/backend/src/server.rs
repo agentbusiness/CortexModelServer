@@ -28,7 +28,7 @@ use cc_protocol::contracts::serve::*;
 use cc_protocol::contracts::lifecycle::{ProbeCheck, ProbeReport};
 use cc_protocol::{Ctx, RpcError, codes};
 use serde_json::{Value, json};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -65,6 +65,13 @@ struct State {
     plan_notes: Vec<String>,
     cluster: Cluster,
     loaded: bool,
+    /// Settings a calibration is trying now, by lane. Never recorded: the lanes' settings stay as
+    /// they are, and `apply` runs these until they are cleared.
+    trial: BTreeMap<String, Trial>,
+    /// What the last full calibration found, by lane; the plan runs it.
+    calibrated: BTreeMap<String, plan::Tuned>,
+    /// The GPU calibration moved a once-per-computer recipe to.
+    moved: BTreeMap<String, u32>,
 }
 
 pub struct Server {
@@ -78,6 +85,7 @@ pub struct Server {
     started: std::sync::atomic::AtomicBool,
     /// Lanes being warmed now, and when each was last tried (ms).
     warming: Mutex<HashMap<String, u64>>,
+    calibrating: std::sync::atomic::AtomicBool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -109,6 +117,7 @@ impl Server {
             stats: Mutex::new(stats::Stats::default()),
             started: std::sync::atomic::AtomicBool::new(false),
             warming: Mutex::new(HashMap::new()),
+            calibrating: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -176,8 +185,19 @@ impl Server {
             .await
             .map(|rows| rows.iter().filter_map(|row| row.first().and_then(Value::as_str).map(str::to_owned)).collect())
             .unwrap_or_default();
+        let wants: Vec<Want> = graph::query_all("MATCH (s:Selection) WHERE s.ended_ms IS NULL AND (s.state IS NULL OR s.state <> 'gone') RETURN s.app, s.model_id, s.family, s.tags, s.recipe", json!({}))
+            .await
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        let text = |column: usize| row.get(column).map(graph::text).unwrap_or_default();
+                        Want { app: text(0), model_id: text(1), family: text(2), tags: row.get(3).map(graph::texts).unwrap_or_default(), recipe: text(4), loaded: false }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let lanes = match graph::query_all(
-            "MATCH (l:Lane) WHERE l.ended_ms IS NULL AND (l.state IS NULL OR l.state <> 'gone') RETURN l.key, l.recipe, l.gpu, l.slots, l.ctx, l.cache_ram_mib, l.checkpoints, l.kv_type, l.speculative, l.idle_unload_s, l.pinned, l.lend, l.tags, l.manual ORDER BY l.key",
+            "MATCH (l:Lane) WHERE l.ended_ms IS NULL AND (l.state IS NULL OR l.state <> 'gone') RETURN l.key, l.recipe, l.gpu, l.slots, l.ctx, l.cache_ram_mib, l.checkpoints, l.kv_type, l.speculative, l.idle_unload_s, l.pinned, l.lend, l.tags, l.manual, l.draft_max ORDER BY l.key",
             json!({}),
         )
         .await
@@ -189,11 +209,28 @@ impl Server {
             }
         };
         recipes.sort_by(|a, b| a.engine.cmp(&b.engine).then(a.id.cmp(&b.id)));
+        let found = graph::query_all("MATCH (c:Calibration) WHERE c.ended_ms IS NULL AND (c.state IS NULL OR c.state <> 'gone') RETURN c.key, c.plan_slots, c.plan_speculative, c.plan_draft, c.recipe, c.plan_gpu", json!({})).await.unwrap_or_default();
+        let mut calibrated = BTreeMap::new();
+        let mut moved = BTreeMap::new();
+        for row in &found {
+            let key = row.first().and_then(Value::as_str).unwrap_or_default();
+            let slots = row.get(1).and_then(Value::as_u64).unwrap_or(0) as u32;
+            let draft = row.get(3).and_then(Value::as_u64).unwrap_or(0) as u32;
+            if slots > 0 {
+                calibrated.insert(key.to_owned(), plan::Tuned { slots, speculative: (row.get(2).and_then(Value::as_str) == Some("off")).then_some(false), draft_max: (draft > 0).then_some(draft) });
+            }
+            if let (Some(recipe), Some(gpu)) = (row.get(4).and_then(Value::as_str), row.get(5).and_then(Value::as_i64).filter(|gpu| *gpu >= 0)) {
+                moved.insert(recipe.to_owned(), gpu as u32);
+            }
+        }
         {
             let mut state = lock(&self.state);
+            state.calibrated = calibrated;
+            state.moved = moved;
             state.recipes = recipes;
             state.lanes = lanes;
             state.declined = declined;
+            state.wants = wants;
             state.loaded = true;
         }
         // What the lanes served in the last day.
@@ -247,13 +284,16 @@ impl Server {
         graph::put(batch);
     }
 
-    /// What the Cortex apps on this computer use: the models their cards list (the cards of
-    /// local members), each matched to the recipe that serves the same model.
+    /// What the Cortex apps on this computer have selected: the models their cards list (the cards
+    /// of local members), each matched to the recipe that serves the same model. An app's card
+    /// replaces what it selected before; an app that is away keeps its selection, so its lanes
+    /// stay ready for when it comes back.
     async fn refresh_wants(&self) {
         let Ok(ctx) = self.ctx() else { return };
         let Some(peers) = peers(ctx).await else { return };
         let recipes = lock(&self.state).recipes.clone();
         let mut wants = Vec::new();
+        let mut named = BTreeSet::new();
         for peer in &peers.peers {
             if !peer.member.local {
                 continue;
@@ -262,13 +302,25 @@ impl Server {
             if card.software == SOFTWARE {
                 continue;
             }
-            for model in &card.models {
-                let recipe = match_recipe(&recipes, &model.model_id, &model.family, &model.tags).map(|recipe| recipe.id.clone()).unwrap_or_default();
-                wants.push(Want { app: card.software.clone(), model_id: model.model_id.clone(), family: model.family.clone(), tags: model.tags.clone(), recipe, loaded: model.loaded });
+            // A card with no model yet (the app is still starting) changes nothing.
+            if card.models.is_empty() && card.uses.is_empty() {
+                continue;
+            }
+            named.insert(card.software.clone());
+            // What it lends and what it uses from a lane here (a model it handed over is on its
+            // card as used, and the lane must stay).
+            let lent = card.models.iter().map(|model| (&model.model_id, &model.family, &model.tags, model.loaded));
+            let used = card.uses.iter().map(|model| (&model.model_id, &model.family, &model.tags, model.loaded));
+            for (model_id, family, tags, loaded) in lent.chain(used) {
+                let recipe = match_recipe(&recipes, model_id, family, tags).map(|recipe| recipe.id.clone()).unwrap_or_default();
+                wants.push(Want { app: card.software.clone(), model_id: model_id.clone(), family: family.clone(), tags: tags.clone(), recipe, loaded });
             }
         }
+        let known = lock(&self.state).wants.clone();
+        wants.extend(known.iter().filter(|want| !named.contains(&want.app)).map(|want| Want { loaded: false, ..want.clone() }));
         wants.sort_by(|a, b| (&a.app, &a.model_id).cmp(&(&b.app, &b.model_id)));
         wants.dedup();
+        record_selections(&known, &wants);
         lock(&self.state).wants = wants;
     }
 
@@ -315,6 +367,9 @@ impl Server {
         if let Some(kv) = &lane.kv_type {
             set(&keys.kv_type, json!(kv));
         }
+        if let Some(depth) = lane.draft_max {
+            set(&keys.draft_max, json!(depth));
+        }
         if lane.speculative == Some(false) && !keys.speculative.is_empty() {
             let off = match recipe.config.get(&keys.speculative) {
                 Some(Value::Bool(_)) => json!(false),
@@ -323,10 +378,13 @@ impl Server {
             };
             set(&keys.speculative, off);
         }
-        // A server keeps its models loaded: a lane unloads when idle only when it was set to.
+        // A lane loads its model on the first call and unloads it after an hour without one, unless
+        // it is pinned, set to never (0), or set to another time.
         let idle = match lane.idle_unload_s {
-            Some(seconds) if seconds > 0 && !lane.pinned => u64::from(seconds),
-            _ => 315_360_000,
+            _ if lane.pinned => 315_360_000,
+            Some(0) => 315_360_000,
+            Some(seconds) => u64::from(seconds),
+            None => 3600,
         };
         set(&keys.idle_unload_s, json!(idle));
         // Every lane gets a memory ceiling: lanes never plan for the whole GPU. The lane's context
@@ -335,21 +393,28 @@ impl Server {
         let planned = fit::total(recipe, lane);
         set(&keys.memory_limit, json!(planned + planned / 4 + (1 << 30)));
         let env = gpu.map(gpus::lane_env).unwrap_or_default().into_iter().collect();
-        LaneSpec { id: lane.id.clone(), plugin: recipe.engine.clone(), config, env }
+        LaneSpec { id: lane.id.clone(), plugin: recipe.engine.clone(), config, env, gpu: gpu.map(|gpu| gpu.index) }
     }
 
     /// Tell the frame which lanes run (all of them; unchanged ones keep serving).
     async fn apply(&self) -> Result<LanesResult, RpcError> {
         let ctx = self.ctx()?.clone();
-        let lanes = lock(&self.state).lanes.clone();
+        let (lanes, trial) = {
+            let state = lock(&self.state);
+            (state.lanes.clone(), state.trial.clone())
+        };
         let mut specs = Vec::new();
         for lane in &lanes {
             let Some(recipe) = self.recipe(&lane.recipe) else {
                 tracing::warn!(lane = %lane.id, recipe = %lane.recipe, "a lane names a recipe this version does not ship; it does not run");
                 continue;
             };
+            let mut lane = lane.clone();
+            if let Some(trial) = trial.get(&lane.id) {
+                trial.on(&mut lane);
+            }
             let gpu = self.gpu(lane.gpu);
-            specs.push(self.spec(lane, &recipe, gpu.as_ref()));
+            specs.push(self.spec(&lane, &recipe, gpu.as_ref()));
         }
         let answer = ctx.call("frame.lanes.set", to_value(&LanesSetParams { lanes: specs })?).await?;
         let result: LanesResult = serde_json::from_value(answer).map_err(|error| RpcError::internal(error.to_string()))?;
@@ -391,6 +456,7 @@ impl Server {
                 Some(false) => "off",
                 None => "",
             });
+            node.t("draft_max", lane.draft_max.map(|v| json!(v)).unwrap_or(json!(-1)));
             node.t("idle_unload_s", lane.idle_unload_s.map(|v| json!(v)).unwrap_or(json!(-1)));
             unit.edge(r("Lane", lane.id.clone()), "ON", machine.clone());
             unit.edge(r("Lane", lane.id.clone()), "RUNS", r("Recipe", recipe.id.clone()));
@@ -478,31 +544,32 @@ impl Server {
     fn planned(&self) -> plan::Output {
         let state = lock(&self.state);
         let manual: Vec<LaneSettings> = state.lanes.iter().filter(|lane| lane.manual).cloned().collect();
-        // Memory other programs hold on each GPU: on a Mac the models the apps here keep loaded
-        // themselves (unified memory has no per-process reading), on a GPU card what it reports
-        // in use beyond this server's loaded lanes.
+        // Memory other programs hold on each GPU: on a GPU card what it reports in use beyond this
+        // server's loaded lanes and the models the apps here are about to let go of (they hand
+        // over to this server); unified memory has no per-process reading.
         let mut taken = std::collections::BTreeMap::new();
         for gpu in &state.gpus {
             let bytes = if gpu.unified {
-                state
+                0
+            } else {
+                let apps: u64 = state
                     .wants
                     .iter()
                     .filter(|want| want.loaded)
                     .filter_map(|want| state.recipes.iter().find(|r| r.id == want.recipe))
                     .map(|recipe| fit::total(recipe, &LaneSettings::default()))
-                    .sum::<u64>()
-            } else {
+                    .sum();
                 let ours: u64 = state
                     .lanes
                     .iter()
                     .filter(|lane| lane.gpu == gpu.index && state.live.get(&lane.id).is_some_and(|live| live.loaded))
                     .filter_map(|lane| state.recipes.iter().find(|r| r.id == lane.recipe).map(|r| fit::total(r, lane)))
                     .sum();
-                gpu.used_bytes.saturating_sub(ours)
+                gpu.used_bytes.saturating_sub(ours).saturating_sub(apps)
             };
             taken.insert(gpu.index, bytes);
         }
-        plan::plan(plan::Input { recipes: &state.recipes, gpus: &state.gpus, reserve: self.reserve(), wants: &state.wants, manual, taken, declined: &state.declined })
+        plan::plan(plan::Input { recipes: &state.recipes, gpus: &state.gpus, reserve: self.reserve(), wants: &state.wants, manual, taken, declined: &state.declined, calibrated: &state.calibrated, moved: &state.moved })
     }
 
     /// Set the planned lanes when they differ from the running ones (manual lanes stay).
@@ -622,15 +689,24 @@ impl Server {
         self.warm(&ctx, &sample.lanes);
     }
 
-    /// Load every running lane's model that is not in memory yet, so the first call finds it
-    /// warm: a chat lane gets a prewarm of a short system block (loads the weights, keeps no
+    /// Load every pinned lane's model that is not in memory yet; every other lane loads on its
+    /// first call. A chat lane gets a prewarm of a short system block (loads the weights, keeps no
     /// conversation), an embedder and an extractor one small real call. A lane is tried again a
     /// minute after a warm-up that did not load it.
     fn warm(&self, ctx: &Ctx, lanes: &[LaneView]) {
         let now = util::now_ms();
         for lane in lanes {
-            if lane.loaded || lane.state != "active" {
+            if !lane.settings.pinned || lane.loaded || lane.state != "active" {
                 continue;
+            }
+            // An app here still holds a model of this lane's tags: it hands over first, so the
+            // two are not in memory together. A call that comes before that loads the lane.
+            {
+                let state = lock(&self.state);
+                let tags = state.recipes.iter().find(|recipe| recipe.id == lane.settings.recipe).map(|recipe| recipe.tags.clone()).unwrap_or_default();
+                if state.wants.iter().any(|want| want.loaded && want.tags.iter().any(|tag| tags.contains(tag))) {
+                    continue;
+                }
             }
             let id = lane.settings.id.clone();
             {
@@ -755,7 +831,9 @@ impl Server {
             self.refresh_hardware().await;
         }
         let changed = self.follow_plan("plan").await;
-        let needs_apply = changed || self.lanes_missing();
+        // A calibration that was dropped midway (its caller went away) leaves no trial behind.
+        let trial_over = !self.calibrating.load(std::sync::atomic::Ordering::SeqCst) && !std::mem::take(&mut lock(&self.state).trial).is_empty();
+        let needs_apply = changed || trial_over || self.lanes_missing();
         if needs_apply && let Err(error) = self.apply().await {
             tracing::warn!(error = %error.message, "the lanes could not be set");
         }
@@ -1024,86 +1102,582 @@ impl Server {
         Ok(History { points })
     }
 
-    /// Measure chat lanes for real: one call alone (decode, prefill, first token), then every slot
-    /// at once (the lane's total).
+    /// Measure every lane for real and, on a full run, apply what was found. A chat lane: one
+    /// call alone (decode, prefill, first token), its total at every slot count worth trying,
+    /// then each drafting setting. Then each GPU's lanes busy at once: memory says what can be
+    /// loaded together, only this says what the GPU can compute together.
     async fn calibrate(&self, only: &str) -> Result<CalibrationResult, RpcError> {
         let ctx = self.ctx()?.clone();
-        let lanes: Vec<LaneView> = self.views().into_iter().filter(|view| view.kind == kinds::CHAT && (only.is_empty() || view.settings.id == only)).collect();
+        let lanes: Vec<LaneView> = self.views().into_iter().filter(|view| only.is_empty() || view.settings.id == only).collect();
         if lanes.is_empty() {
-            return Err(RpcError::not_found(if only.is_empty() { "no chat lane to calibrate".to_owned() } else { format!("no chat lane `{only}`") }));
+            return Err(RpcError::not_found(if only.is_empty() { "no lane to calibrate".to_owned() } else { format!("no lane `{only}`") }));
         }
+        if self.calibrating.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Err(RpcError::new(codes::UNAVAILABLE, "a calibration is running on this computer").retryable());
+        }
+        let _running = CalibrationRunning(&self.calibrating);
         let mut results = Vec::new();
-        for lane in lanes {
+        let mut chosen: BTreeMap<String, Trial> = BTreeMap::new();
+        for lane in &lanes {
             let id = lane.settings.id.clone();
-            let call = |n: usize| {
-                let ctx = ctx.clone();
-                let id = id.clone();
-                async move {
-                    let params = json!({
-                        "plugin": id,
-                        "messages": [{"role": "user", "content": format!("Write {} numbered sentences about how rivers shape valleys. Plain text.", 12 + n)}],
-                        "max_tokens": 192,
-                        "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1},
-                        "thinking": {"enabled": false},
-                        "priority": "background",
-                        "cache_key": format!("calibrate-{id}-{n}"),
-                    });
-                    let started = std::time::Instant::now();
-                    let answer = ctx.call("model.chat", params).await?;
-                    Ok::<(Value, f64), RpcError>((answer, started.elapsed().as_secs_f64()))
+            let mut calibration = Calibration { lane: id.clone(), recipe: lane.settings.recipe.clone(), at_ms: util::now_ms(), current_slots: lane.slots.max(1), kind: lane.kind.clone(), ..Calibration::default() };
+            if lane.kind == kinds::CHAT {
+                match calibrate_call(ctx.clone(), id.clone(), 0).await {
+                    Ok(answer) => {
+                        let usage = &answer["usage"];
+                        let number = |name: &str| usage.get(name).and_then(Value::as_f64).unwrap_or(0.0);
+                        if number("decode_ms") > 0.0 {
+                            calibration.decode_tok_s = number("completion_tokens") / number("decode_ms") * 1000.0;
+                        }
+                        if number("prefill_ms") > 0.0 {
+                            calibration.prefill_tok_s = (number("prompt_tokens") - number("cached_tokens")).max(0.0) / number("prefill_ms") * 1000.0;
+                        }
+                        calibration.ttft_ms = number("queue_ms") + number("prefill_ms");
+                    }
+                    Err(error) => calibration.error = error.message,
                 }
+                if calibration.error.is_empty()
+                    && let Some(trial) = self.tune_chat(&ctx, lane, &mut calibration).await
+                {
+                    chosen.insert(id, trial);
+                }
+            } else if let Some(trial) = self.measure_other(&ctx, lane, &mut calibration).await {
+                chosen.insert(id, trial);
+            }
+            results.push(calibration);
+        }
+        let gpus = if only.is_empty() { self.calibrate_together(&ctx, &lanes, &mut results, &mut chosen).await } else { Vec::new() };
+        self.keep_calibration(only.is_empty(), &lanes, &results, &chosen, &gpus).await;
+        Ok(CalibrationResult { results, gpus })
+    }
+
+    /// Record the results and, on a full run that measured the lanes together, apply them: to a
+    /// lane set by hand directly, to a planned lane through the plan.
+    async fn keep_calibration(&self, full: bool, lanes: &[LaneView], results: &[Calibration], chosen: &BTreeMap<String, Trial>, gpus: &[GpuShare]) {
+        for (lane, calibration) in lanes.iter().zip(results) {
+            let id = calibration.lane.clone();
+            let trial = chosen.get(&id).filter(|_| full && calibration.error.is_empty() && !gpus.iter().any(|share| share.gpu == lane.settings.gpu && !share.error.is_empty()));
+            let mut key = id.clone();
+            if let Some(trial) = trial {
+                if lane.settings.manual {
+                    let edited = {
+                        let mut state = lock(&self.state);
+                        state.lanes.iter_mut().find(|own| own.id == id).map(|own| {
+                            trial.on(own);
+                            own.clone()
+                        })
+                    };
+                    if let (Some(edited), Some(recipe)) = (edited, self.recipe(&lane.settings.recipe)) {
+                        self.record_lane(&edited, &recipe, "calibration", "change");
+                    }
+                } else {
+                    if let Some(gpu) = calibration.moved_to {
+                        key = plan::base_id(&lane.settings.recipe, gpu);
+                        lock(&self.state).moved.insert(lane.settings.recipe.clone(), gpu);
+                        graph::retire(vec![r("Calibration", id.clone())], "moved");
+                    }
+                    let mut state = lock(&self.state);
+                    if key != id {
+                        state.calibrated.remove(&id);
+                    }
+                    state.calibrated.insert(key.clone(), plan::Tuned { slots: trial.slots, speculative: trial.speculative, draft_max: trial.draft_max });
+                }
+            }
+            let (tuned, moved) = {
+                let state = lock(&self.state);
+                (state.calibrated.get(&key).cloned().unwrap_or_default(), state.moved.get(&lane.settings.recipe).copied())
             };
-            let single = call(0).await;
-            let mut calibration = Calibration { lane: id.clone(), recipe: lane.settings.recipe.clone(), at_ms: util::now_ms(), ..Calibration::default() };
-            match single {
-                Ok((answer, _)) => {
-                    let usage = &answer["usage"];
-                    let number = |name: &str| usage.get(name).and_then(Value::as_f64).unwrap_or(0.0);
-                    if number("decode_ms") > 0.0 {
-                        calibration.decode_tok_s = number("completion_tokens") / number("decode_ms") * 1000.0;
-                    }
-                    if number("prefill_ms") > 0.0 {
-                        calibration.prefill_tok_s = (number("prompt_tokens") - number("cached_tokens")).max(0.0) / number("prefill_ms") * 1000.0;
-                    }
-                    calibration.ttft_ms = number("queue_ms") + number("prefill_ms");
-                }
-                Err(error) => calibration.error = error.message,
-            }
-            if calibration.error.is_empty() {
-                let slots = lane.slots.max(1) as usize;
-                let started = std::time::Instant::now();
-                let mut set = tokio::task::JoinSet::new();
-                for n in 1..=slots {
-                    set.spawn(call(n));
-                }
-                let mut generated = 0.0;
-                while let Some(done) = set.join_next().await {
-                    if let Ok(Ok((answer, _))) = done {
-                        generated += answer["usage"]["completion_tokens"].as_f64().unwrap_or(0.0);
-                    }
-                }
-                let wall = started.elapsed().as_secs_f64();
-                if wall > 0.0 {
-                    calibration.aggregate_tok_s = generated / wall;
-                }
-            }
             if let Some(_machine) = graph::machine() {
                 let mut batch = Batch::new();
                 let unit = batch.unit();
-                unit.node("Calibration", id.clone())
+                unit.node("Calibration", key.clone())
                     .t("decode_tok_s", calibration.decode_tok_s)
                     .t("prefill_tok_s", calibration.prefill_tok_s)
                     .t("aggregate_tok_s", calibration.aggregate_tok_s)
                     .t("ttft_ms", calibration.ttft_ms)
+                    .t("best_slots", calibration.best_slots as u64)
+                    .t("together_tok_s", calibration.together_tok_s)
+                    .t("plan_slots", tuned.slots as u64)
+                    .t("plan_speculative", if tuned.speculative == Some(false) { "off" } else { "" })
+                    .t("plan_draft", tuned.draft_max.unwrap_or(0) as u64)
+                    .t("plan_gpu", moved.map_or(json!(-1), |gpu| json!(gpu)))
                     .p("recipe", calibration.recipe.clone())
                     .ps("error", &calibration.error);
-                unit.edge(r("Calibration", id.clone()), "OF", r("Lane", id.clone()));
+                if key == id {
+                    unit.edge(r("Calibration", key.clone()), "OF", r("Lane", id.clone()));
+                }
                 graph::put(batch);
             }
-            results.push(calibration);
         }
-        Ok(CalibrationResult { results })
+        if full {
+            self.follow_plan("calibration").await;
+            if let Err(error) = self.apply().await {
+                tracing::warn!(error = %error.message, "the calibrated lanes could not be set");
+            }
+        }
     }
+
+    /// A lane with no slots or drafting to try: what it gets through.
+    async fn measure_other(&self, ctx: &Ctx, lane: &LaneView, calibration: &mut Calibration) -> Option<Trial> {
+        let recipe = self.recipe(&lane.settings.recipe)?;
+        let id = lane.settings.id.clone();
+        // The first call may load the model; it is not measured.
+        if let Err(error) = lane_work(ctx.clone(), id.clone(), lane.kind.clone(), 0).await {
+            calibration.error = error.message;
+            return None;
+        }
+        let started = std::time::Instant::now();
+        match lane_work(ctx.clone(), id, lane.kind.clone(), 1).await {
+            Ok(work) => {
+                let tok_s = work / started.elapsed().as_secs_f64().max(f64::EPSILON);
+                calibration.sweep.push(SlotLoad { slots: 1, tok_s });
+                calibration.aggregate_tok_s = tok_s;
+                calibration.best_slots = 1;
+                Some(Trial::at(&lane.settings, &recipe, 1))
+            }
+            Err(error) => {
+                calibration.error = error.message;
+                None
+            }
+        }
+    }
+
+    /// Try the lane at each slot count, then each drafting setting at the best of them, and give
+    /// it its own settings back. The settings found.
+    async fn tune_chat(&self, ctx: &Ctx, lane: &LaneView, calibration: &mut Calibration) -> Option<Trial> {
+        let Some(recipe) = self.recipe(&lane.settings.recipe) else {
+            calibration.error = format!("no recipe `{}`", lane.settings.recipe);
+            return None;
+        };
+        let current = calibration.current_slots;
+        let mut most = recipe.slots_max.max(1);
+        // A shared pool must leave every slot the context the engine needs.
+        if recipe.ctx_min_per_slot > 0 && !recipe.ctx_per_slot && recipe.ctx_max > 0 {
+            most = most.min((recipe.ctx_max / recipe.ctx_min_per_slot).max(1));
+        }
+        for slots in slot_counts(current, most.max(current)) {
+            if !self.try_slots(ctx, lane, &recipe, slots, calibration).await {
+                break;
+            }
+        }
+        for slots in slot_midpoints(&calibration.sweep) {
+            if !self.try_slots(ctx, lane, &recipe, slots, calibration).await {
+                break;
+            }
+        }
+        let mut found = None;
+        if !calibration.sweep.is_empty() {
+            calibration.aggregate_tok_s = calibration.sweep.iter().find(|load| load.slots == current).map_or(0.0, |load| load.tok_s);
+            calibration.best_slots = best_slots(&calibration.sweep);
+            let mut trial = Trial::at(&lane.settings, &recipe, calibration.best_slots);
+            calibration.ctx = trial.ctx;
+            let choices = draft_choices(&recipe);
+            for (label, speculative, draft_max) in &choices {
+                let attempt = Trial { speculative: *speculative, draft_max: *draft_max, ..trial.clone() };
+                match self.measure_trial(ctx, &lane.settings.id, &lane.kind, &attempt).await {
+                    Ok(tok_s) => calibration.drafts.push(DraftLoad { label: label.clone(), tok_s }),
+                    Err(error) => {
+                        calibration.sweep_note = format!("drafting {label}: {}", error.message);
+                        break;
+                    }
+                }
+            }
+            if let Some(best) = best_draft(&calibration.drafts) {
+                let (label, speculative, draft_max) = &choices[best];
+                calibration.best_draft = label.clone();
+                trial.speculative = *speculative;
+                trial.draft_max = *draft_max;
+            }
+            found = Some(trial);
+        }
+        lock(&self.state).trial.clear();
+        if let Err(error) = self.apply().await {
+            calibration.error = format!("the lane could not go back to its own settings: {}", error.message);
+            return None;
+        }
+        if found.is_none() {
+            calibration.error = std::mem::take(&mut calibration.sweep_note);
+        }
+        found
+    }
+
+    /// One slot count, if it fits beside the other lanes. False: go no higher (`sweep_note` says
+    /// why).
+    async fn try_slots(&self, ctx: &Ctx, lane: &LaneView, recipe: &Recipe, slots: u32, calibration: &mut Calibration) -> bool {
+        let trial = Trial::at(&lane.settings, recipe, slots);
+        let mut settings = lane.settings.clone();
+        trial.on(&mut settings);
+        if let Some(gpu) = self.gpu(settings.gpu) {
+            let fit = self.fit_of(&settings, recipe, &gpu, &settings.id);
+            if !fit.fits {
+                calibration.sweep_note = format!("{slots} slots: {}", fit.note);
+                return false;
+            }
+        }
+        match self.measure_trial(ctx, &settings.id, &lane.kind, &trial).await {
+            Ok(tok_s) => {
+                calibration.sweep.push(SlotLoad { slots, tok_s });
+                calibration.sweep.sort_by_key(|load| load.slots);
+                true
+            }
+            Err(error) => {
+                calibration.sweep_note = format!("{slots} slots: {}", error.message);
+                false
+            }
+        }
+    }
+
+    /// Reload the lane with `trial` and measure its total with every slot busy.
+    async fn measure_trial(&self, ctx: &Ctx, id: &str, kind: &str, trial: &Trial) -> Result<f64, RpcError> {
+        lock(&self.state).trial = BTreeMap::from([(id.to_owned(), trial.clone())]);
+        self.apply().await?;
+        lane_ready(ctx, id, kind).await?;
+        let running: Option<SlotsResult> = ctx.call("model.slots", json!({"plugin": id})).await.ok().and_then(|value| serde_json::from_value(value).ok());
+        if let Some(running) = running
+            && running.slots.len() != trial.slots as usize
+        {
+            return Err(RpcError::internal(format!("the engine runs {} slots", running.slots.len())));
+        }
+        let started = std::time::Instant::now();
+        let work = lane_round(ctx, id, kind, trial.slots).await?;
+        Ok(work / started.elapsed().as_secs_f64().max(f64::EPSILON))
+    }
+
+    /// Each GPU's lanes busy at once, at their best settings and with chat at one slot each. The
+    /// fewer slots win unless they lose more than 10% of what the GPU gets done. Then, on a
+    /// computer with several GPUs, a lane that may move goes where the lanes get more done.
+    async fn calibrate_together(&self, ctx: &Ctx, lanes: &[LaneView], results: &mut [Calibration], chosen: &mut BTreeMap<String, Trial>) -> Vec<GpuShare> {
+        let mut groups: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for (index, lane) in lanes.iter().enumerate() {
+            if results[index].error.is_empty() && chosen.contains_key(&lane.settings.id) {
+                groups.entry(lane.settings.gpu).or_default().push(index);
+            }
+        }
+        let peaks: Vec<f64> = results.iter().map(|result| result.sweep.iter().map(|load| load.tok_s).fold(0.0, f64::max)).collect();
+        let peak_of = |index: usize| peaks[index].max(f64::EPSILON);
+        let mut shares: BTreeMap<u32, GpuShare> = BTreeMap::new();
+        for (gpu, group) in &groups {
+            if group.len() < 2 {
+                continue;
+            }
+            let best: Vec<Trial> = group.iter().map(|&index| chosen[&lanes[index].settings.id].clone()).collect();
+            let ones: Vec<Trial> = group
+                .iter()
+                .zip(&best)
+                .map(|(&index, trial)| match self.recipe(&lanes[index].settings.recipe) {
+                    Some(recipe) if lanes[index].kind == kinds::CHAT => Trial { speculative: trial.speculative, draft_max: trial.draft_max, ..Trial::at(&lanes[index].settings, &recipe, 1) },
+                    _ => trial.clone(),
+                })
+                .collect();
+            let mut plans = vec![best.clone()];
+            if ones != best {
+                plans.push(ones);
+            }
+            let mut kept_plan: Option<(Vec<Trial>, Vec<f64>, f64)> = None;
+            let mut error = String::new();
+            for plan in plans {
+                let items: Vec<Together> = group.iter().zip(&plan).map(|(&index, trial)| Together::of(&lanes[index], trial, &results[index])).collect();
+                match self.run_together(ctx, &items).await {
+                    Ok(Some(rates)) => {
+                        let kept = group.iter().zip(&rates).map(|(&index, rate)| rate / peak_of(index)).sum::<f64>();
+                        if kept_plan.as_ref().is_none_or(|(_, _, most)| kept >= most * 0.9) {
+                            kept_plan = Some((plan, rates, kept));
+                        }
+                    }
+                    Ok(None) => error = "these settings do not fit in memory together".to_owned(),
+                    Err(failure) => error = failure.message,
+                }
+            }
+            let Some((plan, rates, kept)) = kept_plan else {
+                shares.insert(*gpu, GpuShare { gpu: *gpu, kept: 0.0, error });
+                continue;
+            };
+            for ((&index, trial), rate) in group.iter().zip(plan).zip(rates) {
+                results[index].best_slots = trial.slots;
+                results[index].ctx = trial.ctx;
+                results[index].together_tok_s = rate;
+                chosen.insert(lanes[index].settings.id.clone(), trial);
+            }
+            shares.insert(*gpu, GpuShare { gpu: *gpu, kept, error: String::new() });
+        }
+        let all_gpus: Vec<u32> = lock(&self.state).gpus.iter().map(|gpu| gpu.index).collect();
+        if all_gpus.len() > 1 {
+            let crowded: Vec<u32> = shares.iter().filter(|(_, share)| share.error.is_empty() && share.kept < 0.9).map(|(gpu, _)| *gpu).collect();
+            for gpu in crowded {
+                let group = groups.get(&gpu).cloned().unwrap_or_default();
+                for &index in group.iter().filter(|&&index| self.may_move(&lanes[index])) {
+                    let mut targets: Vec<u32> = all_gpus.iter().copied().filter(|other| *other != gpu).collect();
+                    targets.sort_by_key(|other| groups.get(other).map_or(0, Vec::len));
+                    let Some(&target) = targets.first() else { continue };
+                    let there = groups.get(&target).cloned().unwrap_or_default();
+                    let before = shares.get(&gpu).map_or(0.0, |share| share.kept) + shares.get(&target).map_or(there.len() as f64, |share| share.kept);
+                    let members: Vec<usize> = group.iter().chain(&there).copied().collect();
+                    let items: Vec<Together> = members
+                        .iter()
+                        .map(|&member| {
+                            let mut trial = chosen[&lanes[member].settings.id].clone();
+                            if member == index {
+                                trial.gpu = target;
+                            }
+                            Together::of(&lanes[member], &trial, &results[member])
+                        })
+                        .collect();
+                    let Ok(Some(rates)) = self.run_together(ctx, &items).await else { continue };
+                    let after = members.iter().zip(&rates).map(|(&member, rate)| rate / peak_of(member)).sum::<f64>();
+                    if after <= before * 1.05 {
+                        continue;
+                    }
+                    let kept_on = |on: u32| members.iter().zip(&rates).filter(|(member, _)| if **member == index { on == target } else { lanes[**member].settings.gpu == on }).map(|(&member, rate)| rate / peak_of(member)).sum::<f64>();
+                    shares.insert(gpu, GpuShare { gpu, kept: kept_on(gpu), error: String::new() });
+                    shares.insert(target, GpuShare { gpu: target, kept: kept_on(target), error: String::new() });
+                    for (&member, rate) in members.iter().zip(&rates) {
+                        results[member].together_tok_s = *rate;
+                    }
+                    results[index].moved_to = Some(target);
+                    if let Some(trial) = chosen.get_mut(&lanes[index].settings.id) {
+                        trial.gpu = target;
+                    }
+                    groups.entry(gpu).or_default().retain(|member| *member != index);
+                    groups.entry(target).or_default().push(index);
+                    break;
+                }
+            }
+        }
+        lock(&self.state).trial.clear();
+        if let Err(failure) = self.apply().await {
+            for share in shares.values_mut() {
+                share.error = format!("the lanes could not go back to their own settings: {}", failure.message);
+            }
+        }
+        shares.into_values().collect()
+    }
+
+    /// A lane may change GPU when it is set by hand or planned once per computer: the coding and
+    /// office lanes are planned one per GPU, so moving one would only double another.
+    fn may_move(&self, lane: &LaneView) -> bool {
+        lane.settings.manual || lane.kind != kinds::CHAT || self.recipe(&lane.settings.recipe).is_some_and(|recipe| recipe.tags.iter().any(|tag| tag == "rapid"))
+    }
+
+    /// Run these lanes at once for a fixed time. Each lane's total; None when they do not fit in
+    /// memory together.
+    async fn run_together(&self, ctx: &Ctx, items: &[Together]) -> Result<Option<Vec<f64>>, RpcError> {
+        let trial: BTreeMap<String, Trial> = items.iter().map(|item| (item.id.clone(), item.trial.clone())).collect();
+        let used_gpus: BTreeSet<u32> = items.iter().map(|item| item.trial.gpu).collect();
+        if !used_gpus.iter().all(|gpu| self.trial_fits(*gpu, &trial)) {
+            return Ok(None);
+        }
+        lock(&self.state).trial = trial;
+        self.apply().await?;
+        for item in items {
+            lane_ready(ctx, &item.id, &item.kind).await?;
+        }
+        // Long enough for the slowest lane to finish whole rounds while sharing the GPU.
+        let round = items.iter().map(|item| 192.0 * f64::from(item.trial.slots) / item.alone.max(1.0)).fold(0.0, f64::max);
+        let until = std::time::Instant::now() + Duration::from_secs_f64((round * 5.0).clamp(20.0, 240.0));
+        let mut set = tokio::task::JoinSet::new();
+        for (index, item) in items.iter().enumerate() {
+            let (ctx, id, kind, slots) = (ctx.clone(), item.id.clone(), item.kind.clone(), item.trial.slots);
+            set.spawn(async move { (index, busy_until(ctx, id, kind, slots, until).await) });
+        }
+        let mut rates = vec![0.0; items.len()];
+        while let Some(done) = set.join_next().await {
+            let (index, rate) = done.map_err(|error| RpcError::internal(error.to_string()))?;
+            rates[index] = rate?;
+        }
+        Ok(Some(rates))
+    }
+
+    fn trial_fits(&self, gpu: u32, trial: &BTreeMap<String, Trial>) -> bool {
+        let Some(card) = self.gpu(gpu) else { return true };
+        let usable = gpus::usable(&card, self.reserve());
+        let state = lock(&self.state);
+        let used: u64 = state
+            .lanes
+            .iter()
+            .filter_map(|lane| {
+                let recipe = state.recipes.iter().find(|recipe| recipe.id == lane.recipe)?;
+                let mut lane = lane.clone();
+                if let Some(trial) = trial.get(&lane.id) {
+                    trial.on(&mut lane);
+                }
+                (lane.gpu == gpu).then(|| fit::total(recipe, &lane))
+            })
+            .sum();
+        used <= usable
+    }
+}
+
+/// Settings a calibration runs a lane with for a while.
+#[derive(Debug, Clone, PartialEq)]
+struct Trial {
+    slots: u32,
+    ctx: u32,
+    speculative: Option<bool>,
+    draft_max: Option<u32>,
+    gpu: u32,
+}
+
+impl Trial {
+    fn at(settings: &LaneSettings, recipe: &Recipe, slots: u32) -> Self {
+        Self { slots, ctx: fit::ctx_for_slots(recipe, settings, slots), speculative: settings.speculative, draft_max: settings.draft_max, gpu: settings.gpu }
+    }
+
+    fn on(&self, lane: &mut LaneSettings) {
+        lane.slots = self.slots;
+        if self.ctx > 0 {
+            lane.ctx = self.ctx;
+        }
+        lane.speculative = self.speculative;
+        lane.draft_max = self.draft_max;
+        lane.gpu = self.gpu;
+    }
+}
+
+/// One lane of a run of several at once, with its total alone at these settings.
+struct Together {
+    id: String,
+    kind: String,
+    trial: Trial,
+    alone: f64,
+}
+
+impl Together {
+    fn of(lane: &LaneView, trial: &Trial, result: &Calibration) -> Self {
+        let peak = result.sweep.iter().map(|load| load.tok_s).fold(0.0, f64::max);
+        let alone = result.sweep.iter().find(|load| load.slots == trial.slots).map_or(peak, |load| load.tok_s);
+        Self { id: lane.settings.id.clone(), kind: lane.kind.clone(), trial: trial.clone(), alone }
+    }
+}
+
+/// Marks a calibration as over however it ends.
+struct CalibrationRunning<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for CalibrationRunning<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Wait for a reloaded lane to come up and load its model (one call, not measured).
+async fn lane_ready(ctx: &Ctx, id: &str, kind: &str) -> Result<(), RpcError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(600);
+    loop {
+        match lane_work(ctx.clone(), id.to_owned(), kind.to_owned(), 0).await {
+            Ok(_) => return Ok(()),
+            Err(error) if error.retryable && std::time::Instant::now() < deadline => tokio::time::sleep(Duration::from_secs(2)).await,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Keep every slot of a lane busy until `until`. Only rounds that ended in time count, so all the
+/// work counted was done while the other lanes were busy too.
+async fn busy_until(ctx: Ctx, id: String, kind: String, slots: u32, until: std::time::Instant) -> Result<f64, RpcError> {
+    let started = std::time::Instant::now();
+    let mut done = 0.0;
+    let mut last = None;
+    while std::time::Instant::now() < until {
+        let round = lane_round(&ctx, &id, &kind, slots).await?;
+        let now = std::time::Instant::now();
+        if now <= until {
+            done += round;
+            last = Some(now);
+        }
+    }
+    Ok(last.map_or(0.0, |at| done / (at - started).as_secs_f64().max(f64::EPSILON)))
+}
+
+/// One call per slot at once; the work done.
+async fn lane_round(ctx: &Ctx, id: &str, kind: &str, slots: u32) -> Result<f64, RpcError> {
+    let mut set = tokio::task::JoinSet::new();
+    for n in 1..=slots as usize {
+        set.spawn(lane_work(ctx.clone(), id.to_owned(), kind.to_owned(), n));
+    }
+    let mut work = 0.0;
+    while let Some(done) = set.join_next().await {
+        work += done.map_err(|error| RpcError::internal(error.to_string()))??;
+    }
+    Ok(work)
+}
+
+const WORK_TEXT: &str = "The river carved its valley over a million years, moving silt from the high plateau to the delta, where the town of Arden grew beside the old stone bridge built by the Marlow family.";
+
+/// One real call on a lane; the work it did (tokens generated or read, words extracted from).
+async fn lane_work(ctx: Ctx, id: String, kind: String, n: usize) -> Result<f64, RpcError> {
+    match kind.as_str() {
+        kinds::EMBED => {
+            let texts: Vec<String> = (0..16).map(|i| format!("{WORK_TEXT} Passage {}.", n * 16 + i)).collect();
+            let answer = ctx.call("model.embed", json!({"plugin": id, "texts": texts})).await?;
+            Ok(answer["tokens"].as_f64().unwrap_or(0.0))
+        }
+        kinds::EXTRACT => {
+            let text = format!("{WORK_TEXT} {WORK_TEXT}");
+            let words = text.split_whitespace().count() as f64;
+            ctx.call("model.extract", json!({"plugin": id, "relex": {"text": text, "kinds": ["person", "place", "organization", "thing"], "relations": ["located in", "built by"]}})).await?;
+            Ok(words)
+        }
+        _ => Ok(calibrate_call(ctx, id, n).await?["usage"]["completion_tokens"].as_f64().unwrap_or(0.0)),
+    }
+}
+
+/// One real chat call. `n` varies the prompt, long enough that every call runs to the limit.
+async fn calibrate_call(ctx: Ctx, id: String, n: usize) -> Result<Value, RpcError> {
+    let params = json!({
+        "plugin": id,
+        "messages": [{"role": "user", "content": format!("Write {} numbered sentences about how rivers shape valleys. Plain text.", 40 + n)}],
+        "max_tokens": 192,
+        "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1},
+        "thinking": {"enabled": false},
+        "priority": "background",
+        "cache_key": format!("calibrate-{id}-{n}"),
+    });
+    ctx.call("model.chat", params).await
+}
+
+/// The drafting settings a recipe's engine lets us set, cheapest first: (label, on/off, depth).
+fn draft_choices(recipe: &Recipe) -> Vec<(String, Option<bool>, Option<u32>)> {
+    if recipe.speculative.is_empty() || recipe.speculative == "none" {
+        return Vec::new();
+    }
+    if !recipe.keys.speculative.is_empty() {
+        return vec![("off".to_owned(), Some(false), None), ("on".to_owned(), None, None)];
+    }
+    if recipe.keys.draft_max.is_empty() {
+        return Vec::new();
+    }
+    let own = recipe.config.get(&recipe.keys.draft_max).and_then(Value::as_u64).unwrap_or(4) as u32;
+    let depths: BTreeSet<u32> = [1, 2, 4, 8, own].into_iter().collect();
+    depths.into_iter().map(|depth| (depth.to_string(), None, Some(depth))).collect()
+}
+
+/// The cheapest drafting setting within 5% of the fastest.
+fn best_draft(drafts: &[DraftLoad]) -> Option<usize> {
+    let peak = drafts.iter().map(|load| load.tok_s).fold(0.0, f64::max);
+    drafts.iter().position(|load| load.tok_s >= peak * 0.95)
+}
+
+/// The slot counts to try: 1, 2, 4, 8 … up to the recipe's limit, and the lane's own.
+fn slot_counts(current: u32, most: u32) -> BTreeSet<u32> {
+    let mut counts: BTreeSet<u32> = (0..31).map(|power| 1u32 << power).take_while(|&slots| slots < most).collect();
+    counts.insert(most);
+    counts.insert(current);
+    counts
+}
+
+/// The counts halfway to the best one's neighbours, where the best may really lie.
+fn slot_midpoints(sweep: &[SlotLoad]) -> Vec<u32> {
+    let best = best_slots(sweep);
+    let Some(at) = sweep.iter().position(|load| load.slots == best) else { return Vec::new() };
+    let below = at.checked_sub(1).map(|i| sweep[i].slots);
+    let above = sweep.get(at + 1).map(|load| load.slots);
+    [below.map(|slots| (slots + best) / 2), above.map(|slots| (slots + best) / 2)].into_iter().flatten().filter(|slots| !sweep.iter().any(|load| load.slots == *slots)).collect()
+}
+
+/// The fewest slots within 10% of the highest total: a slot that adds less only splits the
+/// speed between its calls, and a difference that small is within a short run's noise.
+fn best_slots(sweep: &[SlotLoad]) -> u32 {
+    let peak = sweep.iter().map(|load| load.tok_s).fold(0.0, f64::max);
+    sweep.iter().find(|load| load.tok_s >= peak * 0.9).map_or(0, |load| load.slots)
 }
 
 /// Re-measure the hardware every 10 minutes (a GPU added or taken out, drivers updated).
@@ -1153,6 +1727,7 @@ fn lane_of_row(row: &[Value]) -> Option<LaneSettings> {
         lend: flag(11, true),
         tags: row.get(12).and_then(Value::as_array).map(|tags| tags.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default(),
         manual: flag(13, false),
+        draft_max: optional(14),
     })
 }
 
@@ -1172,6 +1747,26 @@ fn match_recipe<'a>(recipes: &'a [Recipe], model_id: &str, family: &str, tags: &
     let mut same: Vec<&&Recipe> = usable.iter().filter(|recipe| (family.is_empty() || recipe.family.eq_ignore_ascii_case(family)) && recipe.tags.iter().any(|t| tags.contains(t))).collect();
     same.sort_by_key(|recipe| (recipe.engine != "model-uzu", !recipe.auto));
     same.first().map(|recipe| **recipe)
+}
+
+/// Keep in the graph what changed in the apps' selections.
+fn record_selections(known: &[Want], wants: &[Want]) {
+    let key = |want: &Want| format!("{}|{}", want.app, want.model_id);
+    let same = |a: &Want, b: &Want| key(a) == key(b) && a.family == b.family && a.tags == b.tags && a.recipe == b.recipe;
+    let gone: Vec<_> = known.iter().filter(|want| !wants.iter().any(|now| key(now) == key(want))).map(|want| r("Selection", key(want))).collect();
+    if !gone.is_empty() {
+        graph::retire(gone, "no longer selected");
+    }
+    let Some(machine) = graph::machine() else { return };
+    let mut batch = Batch::new();
+    for want in wants.iter().filter(|want| !known.iter().any(|before| same(before, want))) {
+        let unit = batch.unit();
+        unit.node("Selection", key(want)).p("app", want.app.clone()).p("model_id", want.model_id.clone()).p("family", want.family.clone()).p("recipe", want.recipe.clone()).pl("tags", want.tags.clone());
+        unit.edge(r("Selection", key(want)), "ON", machine.clone());
+    }
+    if !batch.is_empty() {
+        graph::put(batch);
+    }
 }
 
 async fn peers(ctx: &Ctx) -> Option<PeersResult> {
