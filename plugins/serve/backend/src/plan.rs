@@ -10,8 +10,11 @@
 //!    waits to load until the app has let go of it.
 //!
 //! Every lane is fitted (weights + KV + buffers, beside the lanes already on its GPU) and its
-//! context shrunk to fit when needed; one that does not fit is left out with a note. No GPU: no
-//! lanes (the standard's GPU rule).
+//! context shrunk to fit when needed. A model an app selected always gets a lane where it fits
+//! alone on a Mac's shared memory: a lane loads on its first call, so lanes that do not fit loaded
+//! together take turns, and on such a GPU a model gives its memory back after five idle minutes.
+//! Elsewhere (a discrete GPU's memory is hard) one that does not fit is left out with a note. No
+//! GPU: no lanes (the standard's GPU rule).
 //!
 //! A planned lane runs the slots and drafting the last full calibration found for it, measured
 //! with the other lanes of its GPU busy, with its context sized for those slots; before one has
@@ -20,6 +23,9 @@
 use crate::fit;
 use cc_protocol::contracts::serve::{Gpu, LaneSettings, PlanChange, Recipe, Want};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// How long a model of a GPU whose lanes take turns stays loaded without a call.
+const TAKING_TURNS_IDLE_UNLOAD_S: u32 = 300;
 
 /// What a full calibration found for a lane.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -76,8 +82,9 @@ impl Room<'_> {
         crate::gpus::usable(gpu, self.reserve).saturating_sub(self.used.get(&gpu.index).copied().unwrap_or(0))
     }
 
-    /// Place `recipe` on `gpu` when it fits there (its context shrunk to fit). True when placed.
-    fn place(&mut self, recipe: &Recipe, gpu: &Gpu) -> bool {
+    /// Place `recipe` on `gpu` when it fits there (its context shrunk to fit), beside the other
+    /// lanes or, with `taking_turns`, on the GPU alone. True when placed.
+    fn place(&mut self, recipe: &Recipe, gpu: &Gpu, taking_turns: bool) -> bool {
         if self.declined.contains(&format!("{}-g{}", recipe.id, gpu.index)) {
             return false;
         }
@@ -88,7 +95,11 @@ impl Room<'_> {
         if !recipe.backends.is_empty() && !recipe.backends.iter().any(|backend| *backend == gpu.backend || backend == "cpu") {
             return false;
         }
-        let free = if on_device { self.free(gpu) } else { u64::MAX };
+        let free = match (on_device, taking_turns) {
+            (false, _) => u64::MAX,
+            (true, false) => self.free(gpu),
+            (true, true) => crate::gpus::usable(gpu, self.reserve),
+        };
         let id = self.lane_id(&recipe.id, gpu.index);
         let found = self.calibrated;
         let tuned = found.get(&id).filter(|tuned| tuned.slots > 0);
@@ -132,7 +143,7 @@ impl Room<'_> {
 }
 
 /// Whether a lane of `recipe` runs on `gpu` itself. One whose engine has no path to this kind of
-/// GPU (the embedder and extractor on Vulkan) runs on the CPU and takes none of its memory.
+/// GPU (the extractor on Vulkan) runs on the CPU and takes none of its memory.
 fn runs_on(recipe: &Recipe, gpu: &Gpu) -> bool {
     recipe.backends.is_empty() || recipe.backends.iter().any(|backend| *backend == gpu.backend)
 }
@@ -165,12 +176,21 @@ pub fn plan(input: Input) -> Output {
         if let Some(moved) = input.moved.get(&recipe.id) {
             order.sort_by_key(|gpu| gpu.index != *moved);
         }
-        let placed = order.iter().any(|gpu| room.place(&recipe, gpu));
-        if placed {
+        let beside = order.iter().any(|gpu| room.place(&recipe, gpu, false));
+        let taking_turns = !beside && order.iter().filter(|gpu| gpu.backend == "metal").any(|gpu| room.place(&recipe, gpu, true));
+        if beside || taking_turns {
             served_wants.insert(want.recipe.clone());
         } else {
-            room.notes.push(format!("{} uses {}, which does not fit beside the other lanes here.", want.app, recipe.name));
+            room.notes.push(format!("{} uses {}, which does not fit on this computer.", want.app, recipe.name));
         }
+        if taking_turns {
+            room.notes.push(format!("{} takes turns with the other lanes: not all of them fit loaded at once.", recipe.name));
+        }
+    }
+    // Lanes that take turns give their memory back soon.
+    let crowded: BTreeSet<u32> = room.gpus.iter().filter(|gpu| room.used.get(&gpu.index).copied().unwrap_or(0) > crate::gpus::usable(gpu, room.reserve)).map(|gpu| gpu.index).collect();
+    for lane in room.lanes.iter_mut().filter(|lane| !lane.manual && crowded.contains(&lane.gpu)) {
+        lane.idle_unload_s = Some(TAKING_TURNS_IDLE_UNLOAD_S);
     }
     if room.lanes.is_empty() {
         room.notes.push("No Cortex app on this computer has selected a model yet, and no lane was set by hand.".into());

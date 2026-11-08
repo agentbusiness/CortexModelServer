@@ -25,8 +25,6 @@ pub mod tags {
     /// The large office model (Gemma 4 26B-A4B): only a call that selected it claims it.
     pub const LARGE_OFFICE: &str = "largeoffice";
     // CortexModelServer: the tags of the models this app lends beside the two above.
-    /// Embedding: texts to vectors (`model.embed`), no generation.
-    pub const EMBED: &str = "embed";
     /// The knowledge app's tag for its GLiNER-relex extractor (`model.extract`): its calls claim a model by
     /// this tag, and the extractor carries it alone, as the knowledge app's lane does.
     pub const BILSTM: &str = "bilstm";
@@ -36,8 +34,6 @@ pub mod tags {
 pub mod kinds {
     /// Generation: `model.chat`, `model.complete` and the calls around them.
     pub const CHAT: &str = "chat";
-    /// `model.embed`.
-    pub const EMBED: &str = "embed";
     /// `model.extract`.
     pub const EXTRACT: &str = "extract";
 }
@@ -83,9 +79,6 @@ pub mod methods {
     pub const SELECT: &str = "model.select";
     /// Recent throughput ([`super::LiveMetrics`]), as `model.slots` carries it in `metrics`.
     pub const METRICS: &str = "model.metrics";
-    /// Texts to vectors ([`super::EmbedParams`] → [`super::EmbedResult`]). Answered by a model of
-    /// kind `embed`; others answer `unavailable`.
-    pub const EMBED: &str = "model.embed";
     /// One passage to entities and relations ([`super::ExtractParams`] → [`super::ExtractResult`]),
     /// as the knowledge app's mesh sends it to a lent extractor. Answered by a model of kind `extract`;
     /// others answer `unavailable`.
@@ -93,7 +86,7 @@ pub mod methods {
 
     /// Every `model.*` method of `model@1`, in the order above: what a model plugin may provide
     /// and what the mesh may lend with a model.
-    pub const ALL: &[&str] = &[INFO, CHAT, COMPLETE, TOKENIZE, COUNT, SLOTS, HIBERNATE, HOLD, PREWARM, VARIANTS, SELECT, METRICS, EMBED, EXTRACT];
+    pub const ALL: &[&str] = &[INFO, CHAT, COMPLETE, TOKENIZE, COUNT, SLOTS, HIBERNATE, HOLD, PREWARM, VARIANTS, SELECT, METRICS, EXTRACT];
 }
 
 pub mod topics {
@@ -660,37 +653,6 @@ pub struct SelectResult {
     pub unload_ms: f64,
     pub load_ms: f64,
     pub info: ModelInfo,
-}
-
-pub fn default_normalize() -> bool {
-    true
-}
-
-/// `model.embed`: texts to vectors, one per text, in order.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EmbedParams {
-    pub texts: Vec<String>,
-    /// L2-normalize each vector. A model that always normalizes (mean-pooled sentence encoders)
-    /// returns unit vectors either way.
-    #[serde(default = "default_normalize")]
-    pub normalize: bool,
-    /// Tokens read per text at most (fewer than the model's own limit cuts each text shorter;
-    /// more is capped at it). Absent: the model's limit.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub truncate: Option<u32>,
-}
-
-/// Result of `model.embed`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct EmbedResult {
-    /// One vector per text, in the order of `texts`, each `dims` long.
-    pub vectors: Vec<Vec<f32>>,
-    pub dims: u32,
-    /// The model that embedded them (its [`ModelInfo::model_id`]): vectors of different models are
-    /// not comparable.
-    pub model_id: String,
-    /// Tokens read over all texts (after truncation).
-    pub tokens: u64,
 }
 
 pub fn default_extract_threshold() -> f32 {

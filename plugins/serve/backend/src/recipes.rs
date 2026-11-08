@@ -53,6 +53,8 @@ struct Raw {
     #[serde(default)]
     ctx_min_per_slot: u32,
     #[serde(default)]
+    reserve_bytes: u64,
+    #[serde(default)]
     slots_default: u32,
     #[serde(default)]
     slots_max: u32,
@@ -138,6 +140,8 @@ fn convert(raw: Raw) -> Recipe {
         ctx_max: raw.ctx_max.max(raw.ctx_default),
         ctx_per_slot: raw.ctx_per_slot,
         ctx_min_per_slot: raw.ctx_min_per_slot,
+        ctx_min: 0,
+        reserve_bytes: raw.reserve_bytes,
         // 0: the engine's own fitter picks the slots (CortexAgent's).
         slots_default: raw.slots_default,
         slots_max: raw.slots_max.max(raw.slots_default).max(1),

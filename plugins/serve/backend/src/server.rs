@@ -185,17 +185,18 @@ impl Server {
             .await
             .map(|rows| rows.iter().filter_map(|row| row.first().and_then(Value::as_str).map(str::to_owned)).collect())
             .unwrap_or_default();
-        let wants: Vec<Want> = graph::query_all("MATCH (s:Selection) WHERE s.ended_ms IS NULL AND (s.state IS NULL OR s.state <> 'gone') RETURN s.app, s.model_id, s.family, s.tags, s.recipe", json!({}))
+        let wants: Vec<Want> = graph::query_all("MATCH (s:Selection) WHERE s.ended_ms IS NULL AND (s.state IS NULL OR s.state <> 'gone') RETURN s.app, s.model_id, s.family, s.tags, s.recipe, s.ctx_needed", json!({}))
             .await
             .map(|rows| {
                 rows.iter()
                     .map(|row| {
                         let text = |column: usize| row.get(column).map(graph::text).unwrap_or_default();
-                        Want { app: text(0), model_id: text(1), family: text(2), tags: row.get(3).map(graph::texts).unwrap_or_default(), recipe: text(4), loaded: false }
+                        Want { app: text(0), model_id: text(1), family: text(2), tags: row.get(3).map(graph::texts).unwrap_or_default(), recipe: text(4), ctx_needed: row.get(5).and_then(Value::as_u64).unwrap_or(0) as u32, loaded: false }
                     })
                     .collect()
             })
             .unwrap_or_default();
+        apply_needs(&mut recipes, &wants);
         let lanes = match graph::query_all(
             "MATCH (l:Lane) WHERE l.ended_ms IS NULL AND (l.state IS NULL OR l.state <> 'gone') RETURN l.key, l.recipe, l.gpu, l.slots, l.ctx, l.cache_ram_mib, l.checkpoints, l.kv_type, l.speculative, l.idle_unload_s, l.pinned, l.lend, l.tags, l.manual, l.draft_max ORDER BY l.key",
             json!({}),
@@ -309,11 +310,11 @@ impl Server {
             named.insert(card.software.clone());
             // What it lends and what it uses from a lane here (a model it handed over is on its
             // card as used, and the lane must stay).
-            let lent = card.models.iter().map(|model| (&model.model_id, &model.family, &model.tags, model.loaded));
-            let used = card.uses.iter().map(|model| (&model.model_id, &model.family, &model.tags, model.loaded));
-            for (model_id, family, tags, loaded) in lent.chain(used) {
+            let lent = card.models.iter().map(|model| (&model.model_id, &model.family, &model.tags, model.loaded, model.ctx_needed));
+            let used = card.uses.iter().map(|model| (&model.model_id, &model.family, &model.tags, model.loaded, model.ctx_needed));
+            for (model_id, family, tags, loaded, ctx_needed) in lent.chain(used) {
                 let recipe = match_recipe(&recipes, model_id, family, tags).map(|recipe| recipe.id.clone()).unwrap_or_default();
-                wants.push(Want { app: card.software.clone(), model_id: model_id.clone(), family: family.clone(), tags: tags.clone(), recipe, loaded });
+                wants.push(Want { app: card.software.clone(), model_id: model_id.clone(), family: family.clone(), tags: tags.clone(), recipe, ctx_needed, loaded });
             }
         }
         let known = lock(&self.state).wants.clone();
@@ -321,7 +322,9 @@ impl Server {
         wants.sort_by(|a, b| (&a.app, &a.model_id).cmp(&(&b.app, &b.model_id)));
         wants.dedup();
         record_selections(&known, &wants);
-        lock(&self.state).wants = wants;
+        let mut state = lock(&self.state);
+        apply_needs(&mut state.recipes, &wants);
+        state.wants = wants;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -391,7 +394,7 @@ impl Server {
         // bounds what it allocates; the ceiling leaves the engine room for what it keeps aside
         // beyond the recipe's estimate (its own reserves, snapshots), a quarter and 1 GiB more.
         let planned = fit::total(recipe, lane);
-        set(&keys.memory_limit, json!(planned + planned / 4 + (1 << 30)));
+        set(&keys.memory_limit, json!(planned + planned / 4 + (1 << 30) + recipe.reserve_bytes));
         let env = gpu.map(gpus::lane_env).unwrap_or_default().into_iter().collect();
         LaneSpec { id: lane.id.clone(), plugin: recipe.engine.clone(), config, env, gpu: gpu.map(|gpu| gpu.index) }
     }
@@ -691,7 +694,7 @@ impl Server {
 
     /// Load every pinned lane's model that is not in memory yet; every other lane loads on its
     /// first call. A chat lane gets a prewarm of a short system block (loads the weights, keeps no
-    /// conversation), an embedder and an extractor one small real call. A lane is tried again a
+    /// conversation), an extractor one small real call. A lane is tried again a
     /// minute after a warm-up that did not load it.
     fn warm(&self, ctx: &Ctx, lanes: &[LaneView]) {
         let now = util::now_ms();
@@ -717,7 +720,6 @@ impl Server {
                 warming.insert(id.clone(), now);
             }
             let (method, params) = match lane.kind.as_str() {
-                kinds::EMBED => ("model.embed", json!({"plugin": id, "texts": ["warm up"]})),
                 kinds::EXTRACT => ("model.extract", json!({"plugin": id, "relex": {"text": "The server starts.", "kinds": ["thing"]}})),
                 _ => ("model.prewarm", json!({"plugin": id, "cache_key": format!("serve-warm-{id}"), "messages": [{"role": "system", "content": "You are a helpful assistant."}], "shared_only": true, "idle_only": true})),
             };
@@ -1605,11 +1607,6 @@ const WORK_TEXT: &str = "The river carved its valley over a million years, movin
 /// One real call on a lane; the work it did (tokens generated or read, words extracted from).
 async fn lane_work(ctx: Ctx, id: String, kind: String, n: usize) -> Result<f64, RpcError> {
     match kind.as_str() {
-        kinds::EMBED => {
-            let texts: Vec<String> = (0..16).map(|i| format!("{WORK_TEXT} Passage {}.", n * 16 + i)).collect();
-            let answer = ctx.call("model.embed", json!({"plugin": id, "texts": texts})).await?;
-            Ok(answer["tokens"].as_f64().unwrap_or(0.0))
-        }
         kinds::EXTRACT => {
             let text = format!("{WORK_TEXT} {WORK_TEXT}");
             let words = text.split_whitespace().count() as f64;
@@ -1731,6 +1728,16 @@ fn lane_of_row(row: &[Value]) -> Option<LaneSettings> {
     })
 }
 
+/// Each recipe's smallest context: the most any app that selected the model needs, so one lane
+/// serves them all. A window per slot takes its share.
+fn apply_needs(recipes: &mut [Recipe], wants: &[Want]) {
+    for recipe in recipes {
+        let needed = wants.iter().filter(|want| want.recipe == recipe.id).map(|want| want.ctx_needed).max().unwrap_or(0);
+        let needed = if recipe.ctx_per_slot { needed / recipe.slots_default.max(1) } else { needed };
+        recipe.ctx_min = if recipe.ctx_max > 0 { needed.min(recipe.ctx_max) } else { needed };
+    }
+}
+
 /// The recipe that serves the model an app's card lists: the same weights (the model id names
 /// the repository), else the same family and a shared tag; on a Mac the uzu recipe first.
 fn match_recipe<'a>(recipes: &'a [Recipe], model_id: &str, family: &str, tags: &[String]) -> Option<&'a Recipe> {
@@ -1752,7 +1759,7 @@ fn match_recipe<'a>(recipes: &'a [Recipe], model_id: &str, family: &str, tags: &
 /// Keep in the graph what changed in the apps' selections.
 fn record_selections(known: &[Want], wants: &[Want]) {
     let key = |want: &Want| format!("{}|{}", want.app, want.model_id);
-    let same = |a: &Want, b: &Want| key(a) == key(b) && a.family == b.family && a.tags == b.tags && a.recipe == b.recipe;
+    let same = |a: &Want, b: &Want| key(a) == key(b) && a.family == b.family && a.tags == b.tags && a.recipe == b.recipe && a.ctx_needed == b.ctx_needed;
     let gone: Vec<_> = known.iter().filter(|want| !wants.iter().any(|now| key(now) == key(want))).map(|want| r("Selection", key(want))).collect();
     if !gone.is_empty() {
         graph::retire(gone, "no longer selected");
@@ -1761,7 +1768,7 @@ fn record_selections(known: &[Want], wants: &[Want]) {
     let mut batch = Batch::new();
     for want in wants.iter().filter(|want| !known.iter().any(|before| same(before, want))) {
         let unit = batch.unit();
-        unit.node("Selection", key(want)).p("app", want.app.clone()).p("model_id", want.model_id.clone()).p("family", want.family.clone()).p("recipe", want.recipe.clone()).pl("tags", want.tags.clone());
+        unit.node("Selection", key(want)).p("app", want.app.clone()).p("model_id", want.model_id.clone()).p("family", want.family.clone()).p("recipe", want.recipe.clone()).pl("tags", want.tags.clone()).t("ctx_needed", want.ctx_needed as u64);
         unit.edge(r("Selection", key(want)), "ON", machine.clone());
     }
     if !batch.is_empty() {

@@ -5,10 +5,10 @@
 # The plugins are every folder of plugins/ whose plugin.toml lists this platform (`platforms`): on
 # macOS memory-irongraph, mesh, notify, plugin-manager, settings-host, source-manager, system,
 # theme-cortex, updater, workbench, serve and the engines model-uzu, model-llama, model-llama-agent,
-# model-bonsai, model-relex and model-embed; on Linux the same without the macOS-only engines
+# model-bonsai and model-relex; on Linux the same without the macOS-only engines
 # (model-uzu, model-llama-agent, model-bonsai). Each is built by cortex-pack with its plugin.toml's
 # own `build` (cargo, or the plugin's build script: model-llama, model-llama-agent, model-relex and
-# model-embed `sh build.sh`, system `bash build-release.sh`; model-bonsai builds its llama.cpp from
+# system `bash build-release.sh`; model-bonsai builds its llama.cpp from
 # build.rs).
 #
 #   scripts/build-app.sh [out-dir] [--live]     # default dist/  ->  <out-dir>/CortexModelServer.app

@@ -50,12 +50,11 @@ comes from) on one GPU, with its own slots, context and prompt cache. The engine
 | model-llama-agent | macOS | Gemma 4 (CortexAgent's llama.cpp) |
 | model-bonsai | macOS | Ternary Bonsai 2 27B |
 | model-relex | macOS (Metal), Linux (CUDA, else CPU) | GLiNER-relex (extraction) |
-| model-embed | macOS (Metal), Linux (CUDA, else CPU) | embeddings |
 
-On Linux, model-relex and model-embed use CUDA when NVIDIA's driver is installed and the model-llama
+On Linux, model-relex uses CUDA when NVIDIA's driver is installed and the model-llama
 plugin is present (it carries NVIDIA's libraries). To confirm it on a new NVIDIA machine, look in
-`~/.cortexmodelserver/logs/`: the relex lane's log says `GLiNER-relex loaded device=cuda` and the
-embedder's says `target=candle/gpu`. `device=cpu` or `target=candle/cpu` means it fell back to the CPU.
+`~/.cortexmodelserver/logs/`: the relex lane's log says `GLiNER-relex loaded device=cuda`.
+`device=cpu` means it fell back to the CPU.
 
 `cortexmodelserver recipes` lists every recipe with whether it can run here. Weights go to
 `~/.cortex-models`, the folder every Cortex app shares: a model another app on this computer already

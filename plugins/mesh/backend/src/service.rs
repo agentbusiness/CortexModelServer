@@ -677,8 +677,8 @@ impl Mesh {
         if category != "model" {
             return Vec::new();
         }
-        // CortexModelServer: embedders and extractors are lent too (model.embed, model.extract).
-        [c::model::methods::INFO, c::model::methods::CHAT, c::model::methods::COMPLETE, c::model::methods::TOKENIZE, c::model::methods::COUNT, c::model::methods::SLOTS, c::model::methods::HIBERNATE, c::model::methods::HOLD, c::model::methods::PREWARM, c::model::methods::VARIANTS, c::model::methods::METRICS, c::model::methods::EMBED, c::model::methods::EXTRACT]
+        // CortexModelServer: extractors are lent too (model.extract).
+        [c::model::methods::INFO, c::model::methods::CHAT, c::model::methods::COMPLETE, c::model::methods::TOKENIZE, c::model::methods::COUNT, c::model::methods::SLOTS, c::model::methods::HIBERNATE, c::model::methods::HOLD, c::model::methods::PREWARM, c::model::methods::VARIANTS, c::model::methods::METRICS, c::model::methods::EXTRACT]
             .into_iter()
             .map(str::to_owned)
             .collect()

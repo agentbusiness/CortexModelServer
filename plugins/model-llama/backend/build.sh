@@ -48,7 +48,7 @@ case "$(uname -s)" in
     for lib in libcudart libcublas libcublasLt; do
       cp -L "$cuda/$lib.so.$major" "$out/"
     done
-    # CortexModelServer patch: what model-relex's and model-embed's CUDA builds load besides those;
+    # CortexModelServer patch: what model-relex's CUDA build loads besides those;
     # they use this copy, so the release carries NVIDIA's libraries once. curand has its own major
     # version, so it is taken by its `lib….so.<number>` name.
     for file in "$cuda"/libcurand.so.*; do

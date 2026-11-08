@@ -31,7 +31,7 @@ Every site is marked `CortexModelServer patch:` in the source.
   not load the model when its weights are here, and reading `model.slots` does not count as a use,
   so an idle lane unloads.
 - **NVIDIA's libraries for the other engines** (`backend/build.sh`): the Linux package also carries
-  `libcurand`, which model-relex's and model-embed's CUDA builds link. They use this
+  `libcurand`, which model-relex's CUDA build links. It uses this
   package's copy of all of NVIDIA's libraries, so the release carries them once.
 - **Per-variant settings** (`backend/src/config.rs`, `backend/src/catalog.rs` `Defaults`, `plugin.toml`
   `[backend.config]`): `ctx`, `parallel`, `ubatch`, `kv_type`, `draft_max`, `cache_ram`,

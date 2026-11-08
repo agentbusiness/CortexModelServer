@@ -51,7 +51,7 @@ run in more than one lane (one per GPU, say).
   names the fewest slots that give close to the highest total. The chat lanes of each GPU then run
   at once, because what fits in memory is not what the GPU can compute together, and the
   recommendation comes from that run. A full run also tries each lane's drafting (MTP or
-  DFlash), grows a shared context with its slots, measures embedding and extraction, moves lanes
+  DFlash), grows a shared context with its slots, measures extraction, moves lanes
   between GPUs when that gets more done, and applies all of it, to lanes set by hand too. Calls in progress finish first, but lanes reload several times, so run it
   when quiet. While a person waits on one lane, new other work on that GPU's other lanes waits its
   turn, for at most 30 seconds.
@@ -69,7 +69,6 @@ way it does in the app it comes from. These settings are kept as **recipes**
 | `model-llama-agent` | macOS (Metal) | Gemma 4 E4B and 26B-A4B for agents, with saved slots |
 | `model-bonsai` | macOS (Metal) | Ternary Bonsai 2 27B, for smaller Macs |
 | `model-relex` | macOS, Linux | GLiNER-relex large: entities and relations for knowledge graphs |
-| `model-embed` | macOS, Linux | bekko a8m ModernBERT embeddings |
 
 Every engine is a patched build pinned to an exact revision, and each one is its own plugin.
 `cortexmodelserver recipes` lists every recipe and whether it can run on this machine.

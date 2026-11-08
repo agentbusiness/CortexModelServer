@@ -4,7 +4,7 @@
 //! A lane's context is the KV pool its slots share (the engines' unified pool), so its KV is
 //! `kv_bytes_per_token × ctx`, or each slot's window (`ctx_per_slot`: × slots); a recipe's `kv_bytes_per_token` comes from the engine's own sizing
 //! (its fit code, the model's layer types: sliding-window and recurrent layers count at their
-//! real size). Embedders and extractors have no KV.
+//! real size). Extractors have no KV.
 
 use crate::util;
 use cc_protocol::contracts::serve::{Fit, Gpu, LaneSettings, Recipe};
@@ -13,7 +13,9 @@ use cc_protocol::contracts::serve::{Fit, Gpu, LaneSettings, Recipe};
 pub fn bytes(recipe: &Recipe, settings: &LaneSettings) -> (u64, u64, u64) {
     let ctx = ctx_of(recipe, settings) as u64;
     let windows = if recipe.ctx_per_slot { slots_of(recipe, settings) as u64 } else { 1 };
-    (recipe.weights_bytes, recipe.kv_bytes_per_token.saturating_mul(ctx).saturating_mul(windows), recipe.compute_bytes)
+    // uzu's pool holds memory only as far as its conversations reach; llama.cpp allocates all of it.
+    let filled = if recipe.engine == "model-uzu" && recipe.ctx_min_per_slot > 0 && !recipe.ctx_per_slot { ctx.min(recipe.ctx_min_per_slot as u64 * slots_of(recipe, settings) as u64) } else { ctx };
+    (recipe.weights_bytes, recipe.kv_bytes_per_token.saturating_mul(filled).saturating_mul(windows), recipe.compute_bytes)
 }
 
 pub fn total(recipe: &Recipe, settings: &LaneSettings) -> u64 {
@@ -30,7 +32,7 @@ pub fn ctx_of(recipe: &Recipe, settings: &LaneSettings) -> u32 {
     if recipe.kv_bytes_per_token == 0 && recipe.ctx_default == 0 {
         return 0;
     }
-    let ctx = if settings.ctx == 0 { recipe.ctx_default } else { settings.ctx };
+    let ctx = if settings.ctx == 0 { recipe.ctx_default } else { settings.ctx }.max(recipe.ctx_min);
     if recipe.ctx_max > 0 { ctx.min(recipe.ctx_max) } else { ctx }
 }
 
@@ -87,10 +89,12 @@ pub fn best_ctx(recipe: &Recipe, room: u64) -> Option<u32> {
     if most >= wanted {
         return Some(wanted as u32);
     }
-    // Shrink by halves to no less than 8k: smaller windows are not worth a lane.
+    // Shrink by halves to no less than 8k, or than the apps' minimum: smaller windows are not
+    // worth a lane.
+    let floor = 8192.max(recipe.ctx_min as u64);
     let mut ctx = wanted;
-    while ctx > 8192 && ctx > most {
+    while ctx > floor && ctx > most {
         ctx /= 2;
     }
-    (ctx <= most && ctx >= 8192).then_some(ctx as u32)
+    (ctx <= most && ctx >= floor).then_some(ctx as u32)
 }

@@ -15,7 +15,7 @@ for. When a plan grows a second mechanism for the same thing, drop one of them.
 ## Words
 
 - **Engine**: one of our patched inference engines, each its own plugin of category `model`
-  (`model-uzu`, `model-llama`, `model-llama-agent`, `model-bonsai`, `model-relex`, `model-embed`).
+  (`model-uzu`, `model-llama`, `model-llama-agent`, `model-bonsai`, `model-relex`).
 - **Recipe**: one model on one engine with the exact settings of the app it comes from
   (`plugins/serve/data/recipes/<engine>.toml`, shipped data).
 - **Lane**: one recipe running on one GPU: one frame instance of its engine plugin, named by the lane's
@@ -66,13 +66,19 @@ What this copy adds to the standard today (all additive):
    `ModelCard.kind` / `engine` / `recipe` / `gpu` / `tokens_hour`, `Peer.computer`.
 2. `plugins/mesh/backend/src/card.rs`: fills those from `serve.status.get`; a lane set not to lend
    stays off the card (the standard's "a model not lent is not on the card", per lane).
-3. `plugins/mesh/backend/src/service.rs`: borrowers may also call `model.metrics`, `model.embed`,
+3. `plugins/mesh/backend/src/service.rs`: borrowers may also call `model.metrics`,
    `model.extract`; `mesh.peers` names each member's computer (the machine key the log already holds).
-4. `protocol/src/contracts/model.rs`: `model.embed`, `model.extract`, `ModelInfo.kind`.
+4. `protocol/src/contracts/model.rs`: `model.extract`, `ModelInfo.kind`.
 5. `protocol/src/contracts/frame.rs` and `frame/src/`: lanes (`frame.lanes.*`, routing a model call by
    its `plugin` param, `LaneSpec.gpu` and the GPU line: a person's call on a lane goes before other
    work on that GPU's other lanes, which waits at most 30 s; a lane without `gpu` is not in it).
 6. `protocol/src/contracts/serve.rs`: `serve@1`, this app's own contract.
+
+Embedding is not shared: every app runs its own embedder (IronGraph's, or the knowledge app's in process).
+
+Every app states on its card the context it needs from whoever serves a model (`ModelCard.ctx_needed`, `UsedModel.ctx_needed`, by default the model's `ctx_total`); a lane runs the biggest any app states, and the same field is in every app.
+
+A call claims context as well as a slot (`ClaimParams.tokens`, `claims.rs` in every app): a use holds its stated tokens of the model's shared pool, at least one slot's share. A call waits until the pool has room for it, and the calls behind it wait behind it.
 
 ## Engines are copied, not rewritten
 
@@ -93,7 +99,6 @@ whenever an origin app changes its engine):
 | `model-llama` | CortexTerm `plugins/model-llama` (= the knowledge app's worker) | `backend/vendor` (llama.cpp `468ad58`, 4 patches); `server-context.cpp` also equals `model-worker/vendor/llama.cpp` in the knowledge app's repository | `diff -rq` against CortexTerm; `cmp` against the knowledge app's repository |
 | `model-llama-agent` | CortexAgent `vendor/llama.cpp`, `crates/model`, `crates/llama-engine` | `backend/vendor/llama.cpp` as CortexAgent has it now (its `REVISION`, `PATCHES.md`); catalog, fitter and server flags as in `crates/model` | `diff -rq` against `../CortexAgent/vendor/llama.cpp` |
 | `model-relex` | the knowledge app's `model-worker/src/relex` | `backend/src/relex/` (candle 0.11.0, tokenizers 0.22.2) | `diff -rq` against the knowledge app's repository; `Cargo.lock` versions |
-| `model-embed` | the knowledge app's adapters crate, `src/embedding` | `backend/src/embedding/` (candle 0.10.2, the knowledge app's `embed` feature; bekko only), apart from the renames and the CUDA patch in the plugin's README | `diff -rq` against the knowledge app's repository; `Cargo.lock` versions |
 
 Outside the vendored engines, a plugin's own code may differ from its origin only by a marked
 patch (`// CortexModelServer patch:`, or the plumbing it needs) listed in its README: diff each
@@ -110,9 +115,11 @@ template; the knowledge app's own copy is an older checkout of the same patched 
   (`plugins-data/<exec>/lanes/<id>`). A model call is routed by its `plugin` param to the lane of
   that name. The category's own slot never starts.
 - The serve plugin owns the lanes: they are graph records. A computer starts with none: they come from
-  what the Cortex apps on this computer have selected (their cards, kept while an app is away; only
-  what fits this computer) and from what was set by hand; it sets them in the frame at every
-  start.
+  what the Cortex apps on this computer have selected (their cards, kept while an app is away) and
+  from what was set by hand; it sets them in the frame at every start. On a Mac every selected model
+  that fits the GPU alone gets a lane: lanes that do not fit loaded together take turns, unloading
+  after five idle minutes. On a discrete GPU a lane that does not fit beside the others is left out.
+  Gemma's lanes default to the model's whole context, shrunk only to fit.
 - A full calibration measures every lane, then each GPU's lanes busy at once, and applies what it
   finds to every lane, including lanes set by hand: slots, drafting (`speculative`, `draft_max`), a
   shared context sized for the slots, and the GPU of a lane it may move (a lane set by hand, a

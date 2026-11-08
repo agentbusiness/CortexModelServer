@@ -52,7 +52,6 @@ pub mod topics {
 /// Lane kinds.
 pub mod kinds {
     pub const CHAT: &str = "chat";
-    pub const EMBED: &str = "embed";
     pub const EXTRACT: &str = "extract";
 }
 
@@ -133,6 +132,15 @@ pub struct Recipe {
     /// a conversation's window plus its fixed state); 0 = no bound.
     #[serde(default)]
     pub ctx_min_per_slot: u32,
+    /// The smallest context a lane of this recipe may run: the most any app that selected the
+    /// model says it needs on its card. Set by the serve plugin, not in the recipe's file. A lane
+    /// that cannot have it is not planned, and the app keeps its own model. 0 = no bound.
+    #[serde(default)]
+    pub ctx_min: u32,
+    /// Memory the engine sets aside in its own budget but does not hold: added to the lane's
+    /// memory limit, not charged against the GPU.
+    #[serde(default)]
+    pub reserve_bytes: u64,
     #[serde(default)]
     pub slots_default: u32,
     #[serde(default)]
@@ -462,6 +470,9 @@ pub struct Want {
     /// The recipe that serves it here ("" when none does).
     #[serde(default)]
     pub recipe: String,
+    /// The context the app says it needs (`ModelCard::ctx_needed`).
+    #[serde(default)]
+    pub ctx_needed: u32,
     /// The app has it in memory itself: it is left to the app (no second copy), and its memory
     /// is not planned for lanes.
     #[serde(default)]
