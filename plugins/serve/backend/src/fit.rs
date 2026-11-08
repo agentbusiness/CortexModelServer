@@ -4,25 +4,30 @@
 //! A lane's sizes are the app's own (its recipe), never resized to fit. A shared pool is counted
 //! in shares (`ctx_share`, 32k for the office model): one share per slot, and a call that states
 //! more books several (`ClaimParams.tokens`), so the biggest call any app states gets its shares
-//! on top of the normal slots. A lane whose engine fits its own pool (`keys.ctx` empty: uzu) is
-//! set no context and no slots; it is charged for what its conversations reach. A window per
-//! slot (`ctx_per_slot`) is the engine's fixed window times the slots. Extractors have no KV.
+//! on top of the normal slots. A recipe with no default context (`ctx_default` 0 with KV: Qwen on
+//! uzu) leaves a lane not set by hand to its engine, which fits its own pool in the memory it is
+//! given. A window per slot (`ctx_per_slot`) is the engine's fixed window times the slots.
+//! Extractors have no KV.
 
 use crate::util;
 use cc_protocol::contracts::serve::{Fit, Gpu, LaneSettings, Recipe};
 
-/// The engine sizes its own pool to the memory it is given: the lane sets no context and no slots.
-pub fn engine_fits(recipe: &Recipe) -> bool {
-    recipe.keys.ctx.is_empty() && recipe.kv_bytes_per_token > 0
+/// The engine sizes this lane's pool to the memory it is given: no context is set for it.
+pub fn engine_sized(recipe: &Recipe, settings: &LaneSettings) -> bool {
+    settings.ctx == 0 && recipe.ctx_default == 0 && recipe.kv_bytes_per_token > 0
 }
 
 /// The memory of a lane with these settings.
 pub fn bytes(recipe: &Recipe, settings: &LaneSettings) -> (u64, u64, u64) {
     let ctx = ctx_of(recipe, settings) as u64;
     let windows = if recipe.ctx_per_slot { slots_of(recipe, settings) as u64 } else { 1 };
-    // An engine that fits its own pool holds memory only as far as its conversations reach;
-    // llama.cpp allocates all of it.
-    let filled = if engine_fits(recipe) && recipe.ctx_min_per_slot > 0 { ctx.min(recipe.ctx_min_per_slot as u64 * slots_of(recipe, settings) as u64) } else { ctx };
+    // uzu holds memory only as far as its conversations reach; llama.cpp allocates all of it.
+    let filled = if recipe.engine == "model-uzu" && recipe.ctx_min_per_slot > 0 {
+        let reached = recipe.ctx_min_per_slot as u64 * slots_of(recipe, settings) as u64;
+        if ctx == 0 { reached } else { ctx.min(reached) }
+    } else {
+        ctx
+    };
     (recipe.weights_bytes, recipe.kv_bytes_per_token.saturating_mul(filled).saturating_mul(windows), recipe.compute_bytes)
 }
 
@@ -46,7 +51,7 @@ pub fn slots_of(recipe: &Recipe, settings: &LaneSettings) -> u32 {
 /// The context a lane runs: as set, else one share per slot, else the recipe's own (at least
 /// what the apps state they need).
 pub fn ctx_of(recipe: &Recipe, settings: &LaneSettings) -> u32 {
-    if recipe.kv_bytes_per_token == 0 && recipe.ctx_default == 0 {
+    if (recipe.kv_bytes_per_token == 0 && recipe.ctx_default == 0) || engine_sized(recipe, settings) {
         return 0;
     }
     let ctx = if settings.ctx > 0 {
@@ -69,16 +74,14 @@ pub fn check(recipe: &Recipe, settings: &LaneSettings, gpu: &Gpu, usable: u64, o
     let ctx = ctx_of(recipe, settings);
     let left = room.saturating_sub(weights + compute);
     // The most context that fits with the weights and buffers, and the most slots at the lane's
-    // share (a shared pool) or window (per slot). An engine that fits itself decides both.
+    // share (a shared pool), window (per slot) or one conversation's room (uzu).
     let (max_ctx, max_slots) = if recipe.kv_bytes_per_token == 0 {
         (0, if fits { recipe.slots_max.max(64) } else { 0 })
-    } else if engine_fits(recipe) {
-        (0, 0)
     } else {
         let windows = if recipe.ctx_per_slot { slots as u64 } else { 1 };
         let most_ctx = left / (recipe.kv_bytes_per_token.max(1) * windows);
         let most_ctx = if recipe.ctx_max > 0 { most_ctx.min(recipe.ctx_max as u64) } else { most_ctx };
-        let per_slot = if recipe.ctx_share > 0 { recipe.ctx_share as u64 } else if recipe.ctx_per_slot { ctx.max(1) as u64 } else { 0 };
+        let per_slot = if recipe.ctx_share > 0 { recipe.ctx_share as u64 } else if recipe.ctx_per_slot { ctx.max(1) as u64 } else { recipe.ctx_min_per_slot as u64 };
         let most_slots = if per_slot > 0 { left / (recipe.kv_bytes_per_token.max(1) * per_slot) } else if fits { recipe.slots_max.max(64) as u64 } else { 0 };
         let most_slots = if recipe.slots_max > 0 { most_slots.min(recipe.slots_max as u64) } else { most_slots };
         (most_ctx as u32, most_slots.min(u32::MAX as u64) as u32)
@@ -87,7 +90,7 @@ pub fn check(recipe: &Recipe, settings: &LaneSettings, gpu: &Gpu, usable: u64, o
         format!("needs a GPU of {} or more", util::gb(recipe.min_gpu_bytes))
     } else if !fits {
         format!("needs {} more", util::gb(total - room))
-    } else if engine_fits(recipe) {
+    } else if engine_sized(recipe, settings) {
         format!("fits, the engine sizes its pool in {}", util::gb(room))
     } else if ctx > 0 {
         format!("fits {slots} slot{} at {}", if slots == 1 { "" } else { "s" }, util::ctx_label(ctx))

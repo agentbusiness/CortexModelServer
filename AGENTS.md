@@ -120,18 +120,19 @@ template; the knowledge app's own copy is an older checkout of the same patched 
   what the Cortex apps on this computer have selected (their cards, kept while an app is away) and
   from what was set by hand; it sets them in the frame at every start. A lane runs the app's own
   sizes and is never shrunk or grown to fit: a shared pool is one share per slot plus the shares of
-  the biggest call any app states (`fit::slots_of`, `fit::ctx_of`); an engine that sizes its own
-  pool (uzu: `keys.ctx` empty) is set no slots and no context and fits itself in the memory the
-  lane is given, as CortexCode and the knowledge app run it. On a Mac every selected model that
+  the biggest call any app states (`fit::slots_of`, `fit::ctx_of`); LFM on uzu is one conversation's
+  room per slot, the 32k the knowledge app states; Qwen on uzu (`ctx_default` 0) is set no slots and
+  no context and fits itself in the memory the lane is given, as CortexCode runs it. Slots and
+  context of any lane can be set by hand. On a Mac every selected model that
   fits the GPU alone gets a lane: lanes that do not fit loaded together take turns, unloading after
   five idle minutes, as the knowledge app's own lanes do. On a discrete GPU a lane that does not
   fit beside the others is left out.
 - A calibration measures a lane (one call, its slots busy at once) and tunes its drafting
   (`speculative`, `draft_max`), applied to a lane set by hand directly and to a planned lane through
   the plan. It never changes a lane's slots or context, never moves it, and never removes it.
-- Every lane gets its memory as a limit (`memory_limit_bytes` where the engine has it): an engine
-  that sizes its own pool gets the GPU less the other lanes on it, so it never plans for the whole
-  GPU when other lanes share it.
+- Every lane gets its memory as a limit (`memory_limit_bytes` where the engine has it): a lane its
+  engine sizes gets the GPU less the other lanes on it, so it never plans for the whole GPU when
+  other lanes share it.
 - A lane's process runs from the start, but its model loads on the first real call and unloads after
   an hour without one (`idle_unload_s`), so it stays on the mesh card with `loaded: false`. Only a
   pinned lane is loaded ahead of a call. A lane's self-test does not load its model; reading its

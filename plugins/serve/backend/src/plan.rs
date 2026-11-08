@@ -94,9 +94,9 @@ impl Room<'_> {
         let id = self.lane_id(&recipe.id, gpu.index);
         let tuned = self.calibrated.get(&id).cloned().unwrap_or_default();
         let base = LaneSettings { id, recipe: recipe.id.clone(), gpu: gpu.index, lend: true, speculative: tuned.speculative, draft_max: tuned.draft_max, ..LaneSettings::default() };
-        // The sizes are written out so a change in what the apps need changes the lane. An engine
-        // that fits itself is set none.
-        let settings = if fit::engine_fits(recipe) { base } else { LaneSettings { slots: if recipe.slots_default > 0 { fit::slots_of(recipe, &base) } else { 0 }, ctx: fit::ctx_of(recipe, &base), ..base } };
+        // The sizes are written out so a change in what the apps need changes the lane. A lane
+        // its engine sizes is set none.
+        let settings = if fit::engine_sized(recipe, &base) { base } else { LaneSettings { slots: if recipe.slots_default > 0 { fit::slots_of(recipe, &base) } else { 0 }, ctx: fit::ctx_of(recipe, &base), ..base } };
         let mut taking_turns = false;
         if on_device {
             let bytes = fit::total(recipe, &settings);

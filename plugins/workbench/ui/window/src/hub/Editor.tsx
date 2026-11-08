@@ -358,14 +358,14 @@ function LaneEditor({ row, recipe, live, fit, step, changed, recipeItems, disabl
   const s = row.settings;
   const fitted = typeof fit === 'object' ? fit : undefined;
   const tone = live ? laneTone(live.state, live.loaded, live.error) : null;
-  // An engine that sizes its own pool (uzu) is set no slots and no context: it runs as the app
-  // alone runs it, in the memory the lane is given.
-  const engineFits = Boolean(recipe && recipe.keys?.ctx === '' && (recipe.kv_bytes_per_token ?? 0) > 0);
+  // A recipe with no default context (Qwen on uzu) leaves the pool to its engine unless it is set
+  // here, as the app alone runs it.
+  const engineDefault = Boolean(recipe && !recipe.ctx_default && (recipe.kv_bytes_per_token ?? 0) > 0);
   const slots = s.slots || live?.slots || recipe?.slots_default || 1;
   const maxSlots = Math.max(1, fitted?.max_slots || recipe?.slots_max || 64);
   const ctx = s.ctx || live?.ctx || recipe?.ctx_default || 0;
   const ctxLimit = Math.min(fitted?.max_ctx || Infinity, recipe?.ctx_max || Infinity);
-  const sizes = recipe?.ctx_share ? shareSizes(recipe.ctx_share, ctxLimit) : CONTEXTS.filter((value) => value <= ctxLimit);
+  const sizes = recipe?.ctx_share ? shareSizes(recipe.ctx_share, ctxLimit) : CONTEXTS.filter((value) => value <= ctxLimit && value >= (recipe?.ctx_min_per_slot ?? 0));
   const contexts = [...new Set([...sizes, ...(s.ctx ? [s.ctx] : [])])].sort((a, b) => a - b);
   const cache = s.cache_ram_mib === undefined && !row.customCache ? 'default' : row.customCache ? 'custom' : CACHE_PRESETS.find((preset) => preset.mib === s.cache_ram_mib)?.id ?? 'custom';
   const stepText = step === 'sending' ? 'SENDING…' : step === 'done' ? 'SENT' : step ? 'FAILED' : '';
@@ -388,18 +388,16 @@ function LaneEditor({ row, recipe, live, fit, step, changed, recipeItems, disabl
       <button type="button" className="detent sm warn" disabled={disabled} onClick={onRemove} aria-label="Remove this lane" title="Remove this lane">REMOVE</button>
     </div>
     <div className="cms-ed-line cms-ed-controls">
-      {engineFits && <span className="cms-step" aria-label="Slots and context" title="The engine sizes its pool to the memory the lane is given, as the app alone runs it: as many conversations as the pool holds, each up to the model's context">
-        <span className="ct-label ct-faint">SLOTS · CTX</span><span className="ct-label">ENGINE{live?.ctx ? ` · ${ctxLabel(live.ctx)}` : ''}</span>
-      </span>}
-      {!engineFits && <span className="cms-step" aria-label="Slots">
+      <span className="cms-step" aria-label="Slots">
         <span className="ct-label ct-faint">SLOTS</span>
         <button type="button" className="detent sm" disabled={disabled || slots <= 1} onClick={() => onSet({ slots: slots - 1 })} aria-label="Fewer slots">−</button>
         <span className="num cms-step-v">{slots}</span>
         <button type="button" className="detent sm" disabled={disabled || slots >= maxSlots} onClick={() => onSet({ slots: slots + 1 })} aria-label="More slots" title={`At most ${maxSlots} fit`}>+</button>
-      </span>}
-      {!engineFits && <Menu label="CTX" value={s.ctx ? ctxLabel(s.ctx) : `${ctxLabel(ctx)}`} disabled={disabled} title={recipe?.ctx_share ? `One ${ctxLabel(recipe.ctx_share)} share per slot; a call books the shares it needs${Number.isFinite(ctxLimit) ? `. Up to ${ctxLabel(ctxLimit)} fits` : ''}` : Number.isFinite(ctxLimit) ? `Up to ${ctxLabel(ctxLimit)} fits` : 'Context per lane'}
-        items={[{ key: '0', label: `DEFAULT${recipe?.ctx_share ? ` (${ctxLabel(recipe.ctx_share)} × SLOTS)` : recipe?.ctx_default ? ` (${ctxLabel(recipe.ctx_default)})` : ''}`, selected: !s.ctx, onSelect: () => onSet({ ctx: 0 }) },
-          ...contexts.map((value) => ({ key: String(value), label: ctxLabel(value), selected: s.ctx === value, onSelect: () => onSet({ ctx: value }) }))]} />}
+        {engineDefault && s.slots ? <button type="button" className="ct-link" disabled={disabled} onClick={() => onSet({ slots: 0 })} title="As many conversations as the engine's pool holds">AUTO</button> : null}
+      </span>
+      <Menu label="CTX" value={s.ctx ? ctxLabel(s.ctx) : engineDefault ? `ENGINE${live?.ctx ? ` ${ctxLabel(live.ctx)}` : ''}` : ctxLabel(ctx)} disabled={disabled} title={recipe?.ctx_share ? `One ${ctxLabel(recipe.ctx_share)} share per slot; a call books the shares it needs${Number.isFinite(ctxLimit) ? `. Up to ${ctxLabel(ctxLimit)} fits` : ''}` : Number.isFinite(ctxLimit) ? `Up to ${ctxLabel(ctxLimit)} fits` : 'Context per lane'}
+        items={[{ key: '0', label: `DEFAULT${engineDefault ? ' (ENGINE)' : recipe?.ctx_share ? ` (${ctxLabel(recipe.ctx_share)} × SLOTS)` : recipe?.ctx_default ? ` (${ctxLabel(recipe.ctx_default)})` : ''}`, selected: !s.ctx, onSelect: () => onSet({ ctx: 0 }) },
+          ...contexts.map((value) => ({ key: String(value), label: ctxLabel(value), selected: s.ctx === value, onSelect: () => onSet({ ctx: value }) }))]} />
       <Menu label="CACHE" value={cache === 'default' ? 'DEFAULT' : cache === 'custom' ? `${s.cache_ram_mib ?? 0} MiB` : cache.toUpperCase()} disabled={disabled} title="Prompt cache in RAM and context checkpoints"
         items={[
           { key: 'default', label: 'DEFAULT', note: "the recipe's", selected: cache === 'default', onSelect: () => onRow((entry) => ({ ...entry, customCache: false, settings: { ...entry.settings, cache_ram_mib: undefined, checkpoints: undefined } })) },

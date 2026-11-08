@@ -346,7 +346,7 @@ impl Server {
             }
         };
         // Slots left at 0 by a recipe whose engine fits them itself stay the engine's choice.
-        if lane.slots > 0 || recipe.slots_default > 0 {
+        if lane.slots > 0 || (recipe.slots_default > 0 && !fit::engine_sized(recipe, lane)) {
             set(&keys.slots, json!(fit::slots_of(recipe, lane)));
         }
         let ctx = fit::ctx_of(recipe, lane);
@@ -382,11 +382,11 @@ impl Server {
             None => 3600,
         };
         set(&keys.idle_unload_s, json!(idle));
-        // Every lane gets a memory ceiling. An engine that sizes its own pool gets the GPU less
-        // the other lanes on it, as the app alone would give it less what shares the GPU; a lane
-        // whose context bounds what it allocates gets room for what the engine keeps aside beyond
-        // the recipe's estimate (its own reserves, snapshots), a quarter and 1 GiB more.
-        let limit = if fit::engine_fits(recipe) {
+        // Every lane gets a memory ceiling. A lane its engine sizes gets the GPU less the other
+        // lanes on it, as the app alone would give it less what shares the GPU; a lane whose
+        // context bounds what it allocates gets room for what the engine keeps aside beyond the
+        // recipe's estimate (its own reserves, snapshots), a quarter and 1 GiB more.
+        let limit = if fit::engine_sized(recipe, lane) {
             gpu.map(|gpu| gpus::usable(gpu, self.reserve()).saturating_sub(self.others_bytes(lane, gpu))).unwrap_or(u64::MAX)
         } else {
             let planned = fit::total(recipe, lane);
@@ -499,19 +499,12 @@ impl Server {
             return Err(invalid(format!("{} cannot run here: {}", recipe.name, recipe.reason)));
         }
         let gpu = self.gpu(settings.gpu).ok_or_else(|| invalid(format!("this computer has no GPU {}", settings.gpu)))?;
-        if settings.slots == 0 {
-            settings.slots = recipe.slots_default;
-        }
+        // Slots and context left at 0 stay the default: what the apps need, or the engine's own.
         if settings.slots > 0 && recipe.slots_max > 0 {
             settings.slots = settings.slots.min(recipe.slots_max);
         }
         if settings.ctx > 0 && recipe.ctx_max > 0 {
             settings.ctx = settings.ctx.min(recipe.ctx_max);
-        }
-        // An engine that sizes its own pool is set none.
-        if fit::engine_fits(&recipe) {
-            settings.slots = 0;
-            settings.ctx = 0;
         }
         if settings.id.is_empty() {
             let lanes = lock(&self.state).lanes.clone();
@@ -1247,7 +1240,9 @@ impl Server {
             return None;
         };
         // The lane's own slots, all busy at once: what it gets through. The sizes stay the app's.
-        let current = calibration.current_slots;
+        // An engine that sizes itself reports every conversation it could hold, so such a lane is
+        // measured at the conversations it is charged for.
+        let current = if fit::engine_sized(&recipe, &lane.settings) { fit::slots_of(&recipe, &lane.settings) } else { calibration.current_slots };
         self.try_slots(ctx, lane, &recipe, current, calibration).await;
         let mut found = None;
         if !calibration.sweep.is_empty() {

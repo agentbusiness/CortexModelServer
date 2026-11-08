@@ -14,13 +14,16 @@
 # + 1024 suffix rows, checkpoints = clamp(room / 16 / recurrent_bytes, 2, 8). The vision tower, while
 # loaded, is charged against the pool too.
 #
-# Lane keys: none for the pool or the slots. uzu sizes its own pool to the memory it is given
-# (memory_limit_bytes: the GPU less the other lanes on it) exactly as CortexCode and the knowledge
-# app run it alone: one KV pool every resident conversation shares, committed only as far as the
-# conversations reach, any one of them free to grow to the model's context, as many resident at
-# once as the pool holds (idle ones spilled to disk). The plan charges a lane for slots_default
-# conversations of ctx_min_per_slot each (32,768 plus one conversation's fixed state), what it
-# holds in use; ctx_default is the model's context, not passed.
+# Lane keys:
+# - ctx -> ctx_total: the ONE KV pool (tokens) every resident conversation shares; any one
+#   conversation may grow to min(pool, the model's context). It may only shrink the pool the fit
+#   leaves under memory_limit_bytes (CortexModelServer patch in runtime.rs). The load fails when the
+#   pool is below min(32768, model context) + one conversation's fixed state.
+# - slots -> slots: a cap on resident conversations, and what the mesh card says the lane has
+#   (without a cap the engine reports every conversation the pool could hold).
+# Qwen has no ctx_default: unless a lane sets them by hand, uzu sizes its pool to the memory it is
+# given and holds as many conversations as fit, exactly as CortexCode runs it; the plan charges
+# slots_default conversations of ctx_min_per_slot each. LFM's pool comes from what the apps state.
 # - memory_limit -> memory_limit_bytes: caps the fit's budget (bytes). Each lane is one process that
 #   otherwise plans for the whole Mac (Metal working set, RAM less a quarter, the wired limit less an
 #   eighth of RAM), so set it on every lane so the lanes together fit the machine.
@@ -56,7 +59,7 @@ compute_bytes = 3221225472         # COMPUTE_RESERVE 3 GiB (vision scratch, abou
 kv_bytes_per_token = 53504         # int8 target 33,024 (16 attention layers x 4 KV heads x 256) + bf16 drafter 20,480 (5 layers); bf16 chips: 86,016
 min_gpu_bytes = 25769803777        # above 24 GiB: the plugin's [backend.machine] min_memory_bytes
 ctx_min_per_slot = 60184           # 32,768 + the largest fixed state (27,416 tokens): the pool one conversation needs
-ctx_default = 262144               # the model's context; the engine fits the pool (recurrent state 156,893,184 B, 2-8 checkpoints: 9,822-27,416 tokens each)
+# no ctx_default: the engine fits the pool (recurrent state 156,893,184 B, 2-8 checkpoints: 9,822-27,416 tokens each)
 slots_default = 2                  # conversations the plan charges the lane for; the engine runs as many as the pool holds
 vision = true
 speculative = "dflash"
@@ -65,8 +68,8 @@ speculative = "dflash"
 variant = "qwen3.8-27b-m"
 
 [recipe.keys]
-slots = ""
-ctx = ""
+slots = "slots"
+ctx = "ctx_total"
 cache_ram = ""
 checkpoints = ""
 kv_type = ""
@@ -94,7 +97,7 @@ compute_bytes = 3221225472         # COMPUTE_RESERVE 3 GiB
 kv_bytes_per_token = 16512         # int8: 8 attention layers x 4 KV heads x 256 (of 32 layers, 24 Gated DeltaNet); bf16 chips: 32,768
 min_gpu_bytes = 17179869184        # 16 GiB: weights + 3 GiB + one 32k conversation with its state fit; 8 GB Macs do not
 ctx_min_per_slot = 62512           # 32,768 + the fixed state (29,744 tokens)
-ctx_default = 262144               # the model's context; the engine fits the pool (recurrent state 52,690,944 B, 8 checkpoints: 29,744 tokens each)
+# no ctx_default: the engine fits the pool (recurrent state 52,690,944 B, 8 checkpoints: 29,744 tokens each)
 slots_default = 2                  # conversations the plan charges the lane for; the engine runs as many as the pool holds
 vision = false
 speculative = "none"
@@ -103,8 +106,8 @@ speculative = "none"
 variant = "qwen3.5-4b-m"
 
 [recipe.keys]
-slots = ""
-ctx = ""
+slots = "slots"
+ctx = "ctx_total"
 cache_ram = ""
 checkpoints = ""
 kv_type = ""
@@ -135,10 +138,11 @@ reserve_bytes = 3221225472         # COMPUTE_RESERVE 3 GiB: in the engine's budg
 kv_bytes_per_token = 6336          # int8: 6 attention layers x 8 KV heads x 64 (10 short-convolution layers hold no KV); bf16 chips: 12,288
 min_gpu_bytes = 8589934592         # 8 GiB Macs fit weights + 3 GiB + several 32k conversations
 ctx_min_per_slot = 33792
-# The pool also holds the 24 prefix snapshots. The engine fits it to the memory it is given, as
-# the knowledge app runs it; one conversation never exceeds 32,768.
-ctx_default = 32768                # the window the knowledge app runs it with; the engine fits the pool
-slots_default = 1                  # as the knowledge app runs it: the plan charges one conversation
+# One conversation never exceeds 32,768, the size the knowledge app states on its card. The pool also
+# holds the 24 prefix snapshots, dropped least recently used first when a conversation needs the room.
+ctx_share = 33792                  # one conversation's room (32,768 + its 1,024 suffix rows) per slot
+ctx_default = 33792
+slots_default = 1                  # as the knowledge app runs it
 vision = false
 speculative = "none"
 
@@ -146,8 +150,8 @@ speculative = "none"
 variant = "lfm2.5-1.2b-m"
 
 [recipe.keys]
-slots = ""
-ctx = ""
+slots = "slots"
+ctx = "ctx_total"
 cache_ram = ""
 checkpoints = ""
 kv_type = ""
