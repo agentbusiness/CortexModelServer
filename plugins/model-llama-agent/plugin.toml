@@ -7,7 +7,7 @@
 [plugin]
 id = "model-llama-agent"
 name = "Model (CortexAgent's Gemma 4 on llama.cpp b11876)"
-version = "0.1.0"
+version = "0.1.1"
 description = "Gemma 4 E4B and 26B-A4B (QAT, MTP drafts, vision) on CortexAgent's patched llama.cpp (unslothai 468ad58, b11876), served the way CortexAgent serves them: one unified KV pool, 1 to 16 fitted slots, context up to the model's native length, a host-RAM prompt cache and slot save to disk. macOS (Metal). One instance per lane."
 license = "UNLICENSED"
 platforms = ["macos"]

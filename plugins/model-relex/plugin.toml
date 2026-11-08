@@ -3,7 +3,7 @@
 [plugin]
 id = "model-relex"
 name = "Model (GLiNER-relex extractor)"
-version = "0.1.0"
+version = "0.1.1"
 description = "GLiNER-relex large (knowledgator/gliner-relex-large-v1.0) on candle, the knowledge app's relex lane copied as is: one encoder pass gives a passage's entities and the relations between them (model.extract). Metal on macOS, CUDA on Linux where NVIDIA's driver is, else the CPU; encoder f16, heads f32, BiLSTM on the CPU; 768-subtoken windows."
 license = "UNLICENSED"
 platforms = ["macos", "linux"]

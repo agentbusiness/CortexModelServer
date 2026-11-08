@@ -3,7 +3,7 @@
 [plugin]
 id = "model-embed"
 name = "Model (embeddings)"
-version = "0.1.0"
+version = "0.1.1"
 description = "Texts to vectors (model.embed) with the knowledge app's embedder copied as is: bekko-embedding-v1-a8m (ModernBERT, 384 dims, mean-pooled, L2-normalized) on candle, Metal on macOS, CUDA on Linux where NVIDIA's driver is, else the CPU."
 license = "UNLICENSED"
 platforms = ["macos", "linux"]
