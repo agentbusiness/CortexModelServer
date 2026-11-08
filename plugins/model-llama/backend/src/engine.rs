@@ -431,7 +431,10 @@ impl Engine {
     }
 
     fn extra(&self, source: &str, holder: Value) -> Value {
-        let mut extra = json!({"source": source, "holder": holder, "tier": self.spec().tier, "state": self.state(), "memory_bytes": self.memory});
+        // `ctx_needed`: what one call of this app needs from whoever serves the office model, the
+        // one 32k share every slot of the shared pool holds (not the whole pool); a longer
+        // conversation books more shares through its claim.
+        let mut extra = json!({"source": source, "holder": holder, "tier": self.spec().tier, "state": self.state(), "memory_bytes": self.memory, "ctx_needed": 32_768});
         // CortexModelServer patch: the lane and the GPU it is pinned to.
         if let Some(lane) = &self.lane {
             extra["lane"] = json!(lane);

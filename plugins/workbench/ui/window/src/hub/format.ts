@@ -34,8 +34,14 @@ export function noServer(cause: unknown): boolean {
   return cause instanceof RpcError && (cause.code === 'unknown_method' || cause.code === 'unavailable' || cause.code === 'not_found');
 }
 
-/** Context sizes the editor offers. */
-export const CONTEXTS = [8192, 16384, 32768, 65536, 131072, 262144];
+/** Context sizes the editor offers a pool that is not counted in shares (up to what fits). */
+export const CONTEXTS = [8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576];
+
+/** The sizes a shared pool may have: whole shares, up to `limit` (as many as fit, at most 64). */
+export function shareSizes(share: number, limit: number): number[] {
+  const most = Math.min(64, Number.isFinite(limit) ? Math.floor(limit / share) : 64);
+  return Array.from({ length: Math.max(0, most) }, (_, index) => share * (index + 1));
+}
 
 /** The state of a lane as its pip shows it. */
 export type LaneTone = 'serving' | 'loading' | 'unloaded' | 'error';

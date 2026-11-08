@@ -49,6 +49,8 @@ struct Raw {
     #[serde(default)]
     ctx_max: u32,
     #[serde(default)]
+    ctx_share: u32,
+    #[serde(default)]
     ctx_per_slot: bool,
     #[serde(default)]
     ctx_min_per_slot: u32,
@@ -137,14 +139,17 @@ fn convert(raw: Raw) -> Recipe {
         kv_bytes_per_token: raw.kv_bytes_per_token,
         min_gpu_bytes: raw.min_gpu_bytes,
         ctx_default: raw.ctx_default,
-        ctx_max: raw.ctx_max.max(raw.ctx_default),
+        // 0: no bound of ours, memory bounds it.
+        ctx_max: raw.ctx_max,
+        ctx_share: raw.ctx_share,
         ctx_per_slot: raw.ctx_per_slot,
         ctx_min_per_slot: raw.ctx_min_per_slot,
         ctx_min: 0,
         reserve_bytes: raw.reserve_bytes,
         // 0: the engine's own fitter picks the slots (CortexAgent's).
         slots_default: raw.slots_default,
-        slots_max: raw.slots_max.max(raw.slots_default).max(1),
+        // 0: no bound of ours, memory bounds them.
+        slots_max: raw.slots_max,
         vision: raw.vision,
         speculative: raw.speculative,
         config: table(raw.config),

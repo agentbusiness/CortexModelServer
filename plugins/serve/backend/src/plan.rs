@@ -9,16 +9,15 @@
 //!    (`mesh::Card::sharing_priority`); what it has loaded now is not counted against the plan, and a lane
 //!    waits to load until the app has let go of it.
 //!
-//! Every lane is fitted (weights + KV + buffers, beside the lanes already on its GPU) and its
-//! context shrunk to fit when needed. A model an app selected always gets a lane where it fits
-//! alone on a Mac's shared memory: a lane loads on its first call, so lanes that do not fit loaded
-//! together take turns, and on such a GPU a model gives its memory back after five idle minutes.
-//! Elsewhere (a discrete GPU's memory is hard) one that does not fit is left out with a note. No
-//! GPU: no lanes (the standard's GPU rule).
+//! A planned lane runs the app's own sizes (`fit::slots_of`, `fit::ctx_of`: the recipe's slots,
+//! plus the shares of the biggest call any app states); the plan never shrinks or grows a lane. A
+//! lane runs where it fits the GPU alone: on unified memory (a Mac) the lanes load on a call and
+//! those that do not fit loaded together take turns, giving memory back after five idle minutes;
+//! on a discrete GPU, whose memory is hard, a lane that does not fit beside the others is left out
+//! with a note. No GPU: no lanes (the standard's GPU rule).
 //!
-//! A planned lane runs the slots and drafting the last full calibration found for it, measured
-//! with the other lanes of its GPU busy, with its context sized for those slots; before one has
-//! run, its recipe's defaults. A lane goes to the GPU calibration moved it to.
+//! Calibration measures a lane and tunes its drafting (`speculative`, `draft_max`); a planned lane
+//! runs the drafting the last full calibration found for it.
 
 use crate::fit;
 use cc_protocol::contracts::serve::{Gpu, LaneSettings, PlanChange, Recipe, Want};
@@ -27,10 +26,9 @@ use std::collections::{BTreeMap, BTreeSet};
 /// How long a model of a GPU whose lanes take turns stays loaded without a call.
 const TAKING_TURNS_IDLE_UNLOAD_S: u32 = 300;
 
-/// What a full calibration found for a lane.
+/// What a full calibration found for a lane: its drafting.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Tuned {
-    pub slots: u32,
     pub speculative: Option<bool>,
     pub draft_max: Option<u32>,
 }
@@ -47,8 +45,6 @@ pub struct Input<'a> {
     pub declined: &'a BTreeSet<String>,
     /// What the last full calibration found, by lane id.
     pub calibrated: &'a BTreeMap<String, Tuned>,
-    /// The GPU calibration moved a recipe to.
-    pub moved: &'a BTreeMap<String, u32>,
 }
 
 pub struct Output {
@@ -82,52 +78,40 @@ impl Room<'_> {
         crate::gpus::usable(gpu, self.reserve).saturating_sub(self.used.get(&gpu.index).copied().unwrap_or(0))
     }
 
-    /// Place `recipe` on `gpu` when it fits there (its context shrunk to fit), beside the other
-    /// lanes or, with `taking_turns`, on the GPU alone. True when placed.
-    fn place(&mut self, recipe: &Recipe, gpu: &Gpu, taking_turns: bool) -> bool {
+    /// Place `recipe` on `gpu` at the app's own sizes when it fits there. True when placed;
+    /// `taking_turns` when it fits the GPU alone but not beside the lanes already on it.
+    fn place(&mut self, recipe: &Recipe, gpu: &Gpu) -> Option<bool> {
         if self.declined.contains(&format!("{}-g{}", recipe.id, gpu.index)) {
-            return false;
+            return None;
         }
         let on_device = runs_on(recipe, gpu);
         if on_device && recipe.min_gpu_bytes > 0 && gpu.memory_bytes < recipe.min_gpu_bytes {
-            return false;
+            return None;
         }
         if !recipe.backends.is_empty() && !recipe.backends.iter().any(|backend| *backend == gpu.backend || backend == "cpu") {
-            return false;
+            return None;
         }
-        let free = match (on_device, taking_turns) {
-            (false, _) => u64::MAX,
-            (true, false) => self.free(gpu),
-            (true, true) => crate::gpus::usable(gpu, self.reserve),
-        };
         let id = self.lane_id(&recipe.id, gpu.index);
-        let found = self.calibrated;
-        let tuned = found.get(&id).filter(|tuned| tuned.slots > 0);
-        let calibrated = tuned.map(|tuned| tuned.slots);
-        let slots = calibrated.unwrap_or(recipe.slots_default.max(1)).min(recipe.slots_max.max(1));
-        let windows = if recipe.ctx_per_slot { slots as u64 } else { 1 };
-        let wanted = fit::ctx_for_slots(recipe, &LaneSettings { slots: recipe.slots_default, ..LaneSettings::default() }, slots);
-        let per_window = Recipe { kv_bytes_per_token: recipe.kv_bytes_per_token * windows, ctx_default: if wanted > 0 { wanted } else { recipe.ctx_default }, ..recipe.clone() };
-        let Some(ctx) = fit::best_ctx(&per_window, free) else {
-            return false;
-        };
-        // A shared pool gives every slot at least the share the engine needs: fewer slots
-        // when the pool came out small.
-        let slots = if recipe.ctx_min_per_slot > 0 && !recipe.ctx_per_slot { slots.min(ctx / recipe.ctx_min_per_slot) } else { slots };
-        if slots == 0 {
-            return false;
-        }
-        let slots = if recipe.slots_default == 0 && calibrated.is_none() { 0 } else { slots };
-        let settings = LaneSettings { id, recipe: recipe.id.clone(), gpu: gpu.index, slots, ctx, lend: true, speculative: tuned.and_then(|tuned| tuned.speculative), draft_max: tuned.and_then(|tuned| tuned.draft_max), ..LaneSettings::default() };
-        let bytes = fit::total(recipe, &settings);
-        if bytes > free {
-            return false;
-        }
+        let tuned = self.calibrated.get(&id).cloned().unwrap_or_default();
+        let base = LaneSettings { id, recipe: recipe.id.clone(), gpu: gpu.index, lend: true, speculative: tuned.speculative, draft_max: tuned.draft_max, ..LaneSettings::default() };
+        // The sizes are written out so a change in what the apps need changes the lane. An engine
+        // that fits itself is set none.
+        let settings = if fit::engine_fits(recipe) { base } else { LaneSettings { slots: if recipe.slots_default > 0 { fit::slots_of(recipe, &base) } else { 0 }, ctx: fit::ctx_of(recipe, &base), ..base } };
+        let mut taking_turns = false;
         if on_device {
+            let bytes = fit::total(recipe, &settings);
+            if bytes > crate::gpus::usable(gpu, self.reserve) {
+                return None;
+            }
+            taking_turns = bytes > self.free(gpu);
+            // A discrete GPU's memory is hard: a lane that does not fit beside the others is left out.
+            if taking_turns && !gpu.unified {
+                return None;
+            }
             *self.used.entry(gpu.index).or_default() += bytes;
         }
         self.lanes.push(settings);
-        true
+        Some(taking_turns)
     }
 
     fn lane_id(&self, recipe: &str, gpu: u32) -> String {
@@ -165,26 +149,39 @@ pub fn plan(input: Input) -> Output {
         }
         room.lanes.push(lane);
     }
-    // 2. What the apps on this computer have selected.
-    let mut served_wants = BTreeSet::new();
+    // 2. What the apps on this computer have selected: each model once, on the first GPU with
+    // room beside the other lanes, else the first where it fits alone.
+    let mut served = BTreeSet::new();
     for want in input.wants {
-        if want.recipe.is_empty() || served_wants.contains(&want.recipe) || room.lanes.iter().any(|lane| lane.recipe == want.recipe) {
+        if want.recipe.is_empty() || served.contains(&want.recipe) || room.lanes.iter().any(|lane| lane.recipe == want.recipe) {
             continue;
         }
         let Some(recipe) = room.recipe(&want.recipe).cloned() else { continue };
-        let mut order = gpus.clone();
-        if let Some(moved) = input.moved.get(&recipe.id) {
-            order.sort_by_key(|gpu| gpu.index != *moved);
+        let mut placed = None;
+        for gpu in &gpus {
+            if gpu.unified || room.free(gpu) >= fit::total(&recipe, &LaneSettings::default()) {
+                placed = room.place(&recipe, gpu);
+                if placed.is_some() {
+                    break;
+                }
+            }
         }
-        let beside = order.iter().any(|gpu| room.place(&recipe, gpu, false));
-        let taking_turns = !beside && order.iter().filter(|gpu| gpu.backend == "metal").any(|gpu| room.place(&recipe, gpu, true));
-        if beside || taking_turns {
-            served_wants.insert(want.recipe.clone());
-        } else {
-            room.notes.push(format!("{} uses {}, which does not fit on this computer.", want.app, recipe.name));
+        if placed.is_none() {
+            for gpu in &gpus {
+                placed = room.place(&recipe, gpu);
+                if placed.is_some() {
+                    break;
+                }
+            }
         }
-        if taking_turns {
-            room.notes.push(format!("{} takes turns with the other lanes: not all of them fit loaded at once.", recipe.name));
+        match placed {
+            Some(taking_turns) => {
+                served.insert(want.recipe.clone());
+                if taking_turns {
+                    room.notes.push(format!("{} takes turns with the other lanes: not all of them fit loaded at once.", recipe.name));
+                }
+            }
+            None => room.notes.push(format!("{} uses {}, which does not fit on this computer.", want.app, recipe.name)),
         }
     }
     // Lanes that take turns give their memory back soon.

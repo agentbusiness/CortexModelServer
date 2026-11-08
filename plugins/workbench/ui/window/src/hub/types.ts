@@ -41,6 +41,8 @@ export interface Recipe {
   min_gpu_bytes?: number;
   ctx_default?: number;
   ctx_max?: number;
+  /** A shared pool in shares: one per slot, a call books the shares it needs. */
+  ctx_share?: number;
   ctx_per_slot?: boolean;
   ctx_min_per_slot?: number;
   slots_default?: number;

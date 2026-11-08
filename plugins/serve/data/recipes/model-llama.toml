@@ -23,8 +23,9 @@
 # own cache) until the serve plugin's calibration measures them.
 #
 # ctx: for Gemma (`--kv-unified`) ctx is the ONE pool all slots share (KV = kv_bytes_per_token *
-# ctx); for Qwen ctx is per slot (KV = kv_bytes_per_token * ctx * slots). Exactly as the origins run
-# them.
+# ctx), counted in 32k shares (ctx_share): one share per slot, and a call books the shares it
+# states (ClaimParams.tokens), so the report call's four shares run on top of the normal slots; for
+# Qwen ctx is per slot (KV = kv_bytes_per_token * ctx * slots). Exactly as the origins run them.
 #
 # Not here: LFM2.5-1.2B. LiquidAI publishes an official GGUF repo (LiquidAI/LFM2.5-1.2B-Instruct-GGUF),
 # but no app runs LFM on llama.cpp, so there are no origin settings to copy (the knowledge app runs it on uzu).
@@ -45,17 +46,15 @@ weights_bytes = 4275373792        # UD-Q4_K_XL 4_215_695_776 + MTP head 59_678_0
 compute_bytes = 900000000         # SWA 126 MB + compute buffers (ubatch 2048) + MTP head cache (estimate)
 kv_bytes_per_token = 16384        # f16, full-attention layers only; ctx is the shared pool
 min_gpu_bytes = 9663676416        # 9 GiB: CortexTerm offers E4B above 8 GiB
-ctx_default = 131072              # the model's whole context: every app's calls and the long report calls run on this one lane; the plan shrinks it to fit
-ctx_max = 131072
-ctx_min_per_slot = 32768          # one conversation's room: 4 slots share the pool, and a bigger call claims more of it
-slots_default = 2
-slots_max = 8
+ctx_share = 32768                 # the pool is one 32k share per slot: a normal call books one, the knowledge app's report call books four (ClaimParams.tokens)
+ctx_default = 65536               # two shares, as CortexTerm runs it alone; a lane runs one share per slot plus the shares of the biggest call any app states
+slots_default = 2                 # normal calls side by side, as CortexTerm runs it; no limit of ours on more (memory bounds them)
 vision = false
 speculative = "mtp"
 
 [recipe.config]
 variant = "gemma-4-e4b-qat"
-ctx = 131072
+ctx = 65536
 parallel = 2
 ubatch = 2048
 kv_type = "f16"
@@ -90,17 +89,15 @@ weights_bytes = 2679606624        # UD-Q4_K_XL 2_620_370_976 + MTP head 59_235_6
 compute_bytes = 600000000         # SWA 38 MB + compute buffers (ubatch 2048) + MTP head cache (estimate)
 kv_bytes_per_token = 6144         # f16, full-attention layers only; ctx is the shared pool
 min_gpu_bytes = 4294967296        # 4 GiB: the plugin's smallest usable GPU
-ctx_default = 131072              # the model's whole context; the plan shrinks it to fit
-ctx_max = 131072
-ctx_min_per_slot = 32768          # one conversation's room: 4 slots share the pool, and a bigger call claims more of it
-slots_default = 2
-slots_max = 8
+ctx_share = 32768                 # the pool is one 32k share per slot: a normal call books one, the knowledge app's report call books four (ClaimParams.tokens)
+ctx_default = 65536               # two shares, as CortexTerm runs it alone; a lane runs one share per slot plus the shares of the biggest call any app states
+slots_default = 2                 # normal calls side by side, as CortexTerm runs it; no limit of ours on more (memory bounds them)
 vision = false
 speculative = "mtp"
 
 [recipe.config]
 variant = "gemma-4-e2b-qat"
-ctx = 131072
+ctx = 65536
 parallel = 2
 ubatch = 2048
 kv_type = "f16"
@@ -140,8 +137,7 @@ min_gpu_bytes = 24696061952       # 23 GiB (a 24 GB card), CortexCode's rule
 ctx_default = 32768
 ctx_max = 262144
 ctx_per_slot = true
-slots_default = 2
-slots_max = 4
+slots_default = 2                 # as CortexCode runs it; no limit of ours on more
 vision = true
 speculative = "dflash2"
 
@@ -185,8 +181,7 @@ min_gpu_bytes = 16106127360       # 15 GiB (a 16 GB card), CortexCode's rule
 ctx_default = 32768
 ctx_max = 262144
 ctx_per_slot = true
-slots_default = 2
-slots_max = 4
+slots_default = 2                 # as CortexCode runs it; no limit of ours on more
 vision = true
 speculative = "dflash2"
 

@@ -122,8 +122,14 @@ pub struct Recipe {
     pub min_gpu_bytes: u64,
     #[serde(default)]
     pub ctx_default: u32,
+    /// The most context a lane may be set to; 0 = no bound (memory bounds it).
     #[serde(default)]
     pub ctx_max: u32,
+    /// A shared pool in shares: the context one call books by default (`ClaimParams.tokens`
+    /// books more). The pool is one share per slot, and a call bigger than a share gets its
+    /// shares on top of the normal slots. 0 = the pool is not counted in shares.
+    #[serde(default)]
+    pub ctx_share: u32,
     /// `ctx` is each slot's window (the engine sizes its KV as ctx × slots); otherwise it is the
     /// one pool the slots share.
     #[serde(default)]
@@ -143,6 +149,7 @@ pub struct Recipe {
     pub reserve_bytes: u64,
     #[serde(default)]
     pub slots_default: u32,
+    /// The most slots a lane may be set to; 0 = no bound (memory bounds them).
     #[serde(default)]
     pub slots_max: u32,
     #[serde(default)]

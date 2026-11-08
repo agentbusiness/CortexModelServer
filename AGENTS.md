@@ -80,6 +80,8 @@ Every app states on its card the context it needs from whoever serves a model (`
 
 A call claims context as well as a slot (`ClaimParams.tokens`, `claims.rs` in every app): a use holds its stated tokens of the model's shared pool, at least one slot's share. A call waits until the pool has room for it, and the calls behind it wait behind it.
 
+The office model's pool is counted in 32k shares in every app (`--kv-unified`, `ctx = parallel × 32768`): one share per slot, a normal call books one, a bigger call books several (the knowledge app's 131k report call books four) and runs on the same lane. An app alone runs its own slots (CortexTerm 2, the knowledge app 2 plus the report's four); a server runs one share per slot plus the shares of the biggest call any app on its computer states (`ctx_needed`). No app has a model only for itself: every lane is lent, and a call goes to any computer whose pool has room for it. Nothing of ours caps the slots or the pool; memory does.
+
 ## Engines are copied, not rewritten
 
 Each engine plugin is the origin app's code, copied bit for bit: its vendored engine (uzu `1763a366`
@@ -116,16 +118,20 @@ template; the knowledge app's own copy is an older checkout of the same patched 
   that name. The category's own slot never starts.
 - The serve plugin owns the lanes: they are graph records. A computer starts with none: they come from
   what the Cortex apps on this computer have selected (their cards, kept while an app is away) and
-  from what was set by hand; it sets them in the frame at every start. On a Mac every selected model
-  that fits the GPU alone gets a lane: lanes that do not fit loaded together take turns, unloading
-  after five idle minutes. On a discrete GPU a lane that does not fit beside the others is left out.
-  Gemma's lanes default to the model's whole context, shrunk only to fit.
-- A full calibration measures every lane, then each GPU's lanes busy at once, and applies what it
-  finds to every lane, including lanes set by hand: slots, drafting (`speculative`, `draft_max`), a
-  shared context sized for the slots, and the GPU of a lane it may move (a lane set by hand, a
-  once-per-computer lane). It never removes a lane.
+  from what was set by hand; it sets them in the frame at every start. A lane runs the app's own
+  sizes and is never shrunk or grown to fit: a shared pool is one share per slot plus the shares of
+  the biggest call any app states (`fit::slots_of`, `fit::ctx_of`); an engine that sizes its own
+  pool (uzu: `keys.ctx` empty) is set no slots and no context and fits itself in the memory the
+  lane is given, as CortexCode and the knowledge app run it. On a Mac every selected model that
+  fits the GPU alone gets a lane: lanes that do not fit loaded together take turns, unloading after
+  five idle minutes, as the knowledge app's own lanes do. On a discrete GPU a lane that does not
+  fit beside the others is left out.
+- A calibration measures a lane (one call, its slots busy at once) and tunes its drafting
+  (`speculative`, `draft_max`), applied to a lane set by hand directly and to a planned lane through
+  the plan. It never changes a lane's slots or context, never moves it, and never removes it.
 - Every lane gets its memory as a limit (`memory_limit_bytes` where the engine has it): an engine
-  never plans for the whole GPU when other lanes share it.
+  that sizes its own pool gets the GPU less the other lanes on it, so it never plans for the whole
+  GPU when other lanes share it.
 - A lane's process runs from the start, but its model loads on the first real call and unloads after
   an hour without one (`idle_unload_s`), so it stays on the mesh card with `loaded: false`. Only a
   pinned lane is loaded ahead of a call. A lane's self-test does not load its model; reading its
