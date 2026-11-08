@@ -20,7 +20,8 @@ case "$(uname -s)" in
     ;;
 esac
 build="$here/target/llama-build"
-cmake -S "$here/agent-server" -B "$build" -DCMAKE_BUILD_TYPE=Release \
+# CFLAGS / CXXFLAGS (scripts/build-env.sh) on every configure, not only a new build folder's.
+cmake -S "$here/agent-server" -B "$build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="${CFLAGS:-}" -DCMAKE_CXX_FLAGS="${CXXFLAGS:-}" \
   -DGGML_OPENMP=OFF -DGGML_CCACHE=OFF
 jobs="$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 rm -rf "$out"
