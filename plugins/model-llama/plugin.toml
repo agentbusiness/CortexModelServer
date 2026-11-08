@@ -1,0 +1,43 @@
+# CortexModelServer plugin manifest (plugin.toml, schema ccplugin/1). Paths are relative to this folder.
+
+[plugin]
+id = "model-llama"
+name = "Model (Gemma on llama.cpp)"
+version = "0.1.11"
+description = "Gemma 4 (tag office) on upstream llama.cpp's llama-server with MTP drafts, on Metal on macOS and on the CPU on Linux: E4B above 8 GB, E2B on 8 GB machines. Gemma stays this app's own while other apps on the machine run theirs (each lends its own); only a machine without a usable GPU borrows a member's model."
+license = "UNLICENSED"
+platforms = ["macos", "linux"]
+
+# The logic plugin: a supervised process speaking CPP/1 to the frame. It supervises one llama-server
+# child (built from the vendored llama.cpp by build.sh, shipped in llama/ beside the executable with
+# its GPU backends) on loopback.
+[backend]
+category = "model"
+contract = "model@1"
+dir = "backend"
+build = ["sh", "build.sh"]
+exec = "backend/target/release/cc-model-llama"
+assets = ["backend/target/release/llama"]
+swap = "drain_first"
+hello_timeout_ms = 60000
+# A first start may download the model (2.6 or 4.2 GB) before the probe's generation check.
+probe_timeout_ms = 600000
+provides = [
+  "model.info", "model.chat", "model.complete", "model.tokenize", "model.count", "model.slots",
+  "model.hibernate", "model.hold", "model.prewarm", "model.variants", "model.select",
+]
+publishes = ["model.progress", "model.install"]
+
+# Defaults for the frame config's [plugin.config] table (the frame config's values win).
+[backend.config]
+variant = ""            # "" = by memory: gemma-4-e4b-qat above 8 GiB, gemma-4-e2b-qat otherwise
+# CortexModelServer patch: ctx, parallel, ubatch, kv_type, draft_max, cache_ram, checkpoints,
+# max_tokens and greedy come from the chosen variant (the exact settings of its origin; see README,
+# "CortexModelServer changes") unless set here or in a lane's config. The variants:
+#   gemma-4-e4b-qat, gemma-4-e2b-qat  CortexTerm / the knowledge app's office: ctx 32768 (one unified pool),
+#                                     parallel 2, ubatch 2048, f16, MTP 4, cache_ram 1024, checkpoints 2
+#   gemma-4-e4b-qat-report            the knowledge app's report lane: ctx 131072, parallel 1, max_tokens 16384, greedy
+#   qwen3.8-27b-q4, qwen3.8-27b-q3    CortexCode Linux: ctx 32768 per slot, parallel 2, ubatch 512,
+#                                     q8_0, DFlash 2 at most 7, the vision projector
+idle_unload_s = 600     # unload the model after this long without a request
+borrow = true           # without a usable GPU, use a member's model through the mesh (never on a lane: CORTEX_LANE)

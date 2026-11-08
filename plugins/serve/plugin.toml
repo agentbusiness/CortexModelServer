@@ -1,0 +1,44 @@
+# CortexModelServer plugin manifest (plugin.toml, schema ccplugin/1). One folder is one plugin: its backend,
+# UI packages, shell modules, verification and README together, separable into its own repository
+# (only cc-protocol and @cortex/sdk come from outside). `cortex-pack` builds the folder and packs it
+# into a portable .ccplugin; the frame runs it only as an installed package.
+# Paths are relative to this folder.
+
+[plugin]
+id = "serve"
+name = "Model server"
+version = "0.1.0"
+description = "This computer's model server: reads the GPUs, plans and runs the lanes (one recipe, a model on one of our patched engines, per lane), serves the models the Cortex apps on this computer use, and adds up the whole mesh for the cluster view."
+license = "UNLICENSED"
+platforms = ["macos", "linux"]
+
+[backend]
+category = "serve"
+contract = "serve@1"
+dir = "backend"
+build = ["cargo", "build", "--release"]
+exec = "backend/target/release/cc-serve"
+swap = "blue_green"
+provides = [
+  "serve.status.get", "serve.gpus.list", "serve.recipes.list",
+  "serve.lanes.list", "serve.lanes.create", "serve.lanes.edit", "serve.lanes.delete",
+  "serve.fit.get", "serve.plan.get", "serve.plan.run", "serve.calibrate.run",
+  "serve.cluster.get", "serve.history.read",
+]
+subscribes = ["model.progress", "frame.lanes.changed", "mesh.changed"]
+publishes = ["serve.sample", "serve.changed"]
+uses = [
+  "frame.machine", "frame.plugins.list", "frame.lanes.set", "frame.lanes.list",
+  "model.info", "model.slots", "model.metrics", "model.chat",
+  "mesh.peers", "mesh.status",
+  "system.metrics",
+  "memory.graph.put", "memory.graph.retire", "memory.graph.query", "memory.graph.machine",
+  "memory.stream.append", "memory.stream.read", "memory.settings.list", "memory.settings.set",
+]
+
+[backend.config]
+sample_s = 2             # live readings (serve.sample) and lane polling
+reserve_bytes = 2147483648   # kept free on every GPU (on a Mac: for the system and the apps)
+
+[data]
+dirs = ["data"]

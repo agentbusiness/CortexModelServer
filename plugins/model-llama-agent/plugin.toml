@@ -1,0 +1,50 @@
+# CortexModelServer plugin manifest (plugin.toml, schema ccplugin/1). Paths are relative to this folder.
+#
+# CortexModelServer: from CortexAgent. ct's model-llama, carrying CortexAgent's llama.cpp (unslothai
+# 468ad58, b11876, with its four patch sites, vendor/llama.cpp byte for byte), CortexAgent's catalog and its
+# per-machine fitter. The frame runs one instance per lane (see README.md).
+
+[plugin]
+id = "model-llama-agent"
+name = "Model (CortexAgent's Gemma 4 on llama.cpp b11876)"
+version = "0.1.0"
+description = "Gemma 4 E4B and 26B-A4B (QAT, MTP drafts, vision) on CortexAgent's patched llama.cpp (unslothai 468ad58, b11876), served the way CortexAgent serves them: one unified KV pool, 1 to 16 fitted slots, context up to the model's native length, a host-RAM prompt cache and slot save to disk. macOS (Metal). One instance per lane."
+license = "UNLICENSED"
+platforms = ["macos"]
+
+# The logic plugin: a supervised process speaking CPP/1 to the frame. It supervises one llama-server
+# child (built by build.sh from vendor/llama.cpp through agent-server/, shipped in llama/ beside the
+# executable) on loopback.
+[backend]
+category = "model"
+contract = "model@1"
+dir = "backend"
+build = ["sh", "build.sh"]
+exec = "backend/target/release/cc-model-llama-agent"
+assets = ["backend/target/release/llama"]
+swap = "drain_first"
+hello_timeout_ms = 60000
+# A first start may download the model (5.3 or 15.7 GB with drafter and projector) before the probe.
+probe_timeout_ms = 600000
+provides = [
+  "model.info", "model.chat", "model.complete", "model.tokenize", "model.count", "model.slots",
+  "model.hibernate", "model.hold", "model.prewarm", "model.variants", "model.select",
+]
+publishes = ["model.progress", "model.install"]
+
+# Defaults for the frame config's [plugin.config] table, merged with the lane's own config (the
+# lane's values win). 0 or "" leaves the value to CortexAgent's fitter.
+[backend.config]
+variant = ""          # "" = CortexAgent's recommendation; gemma_4_e4b_it_q4km | gemma_4_26b_a4b_it_q4km
+slots = 0             # --parallel; 0 = fitted (16 halved until each slot gets 32k, at least 2)
+max_slots = 0         # ceiling for the fitted slot count (0 = 16)
+ctx = 0               # ceiling for --ctx-size, the one shared pool (0 = native: 131072 E4B, 262144 26B)
+cache_ram = 0         # ceiling for --cache-ram in MiB (0 = 6144, never more)
+checkpoints = 0       # ceiling for --ctx-checkpoints (0 = 16, never more)
+kv_type = ""          # "" = fitted (f16, q8_0 with flash attention when f16 cannot reach native)
+memory_limit = 0      # device memory ceiling in bytes (0 = none); 3 GiB are reserved below it
+draft_max = 4         # --spec-draft-n-max
+gpu_layers = 99       # --n-gpu-layers
+ubatch = 2048         # --ubatch-size
+vision = true         # --mmproj (the F16 projector of the same revision)
+idle_unload_s = 0     # 0 = keep the model loaded, as CortexAgent does

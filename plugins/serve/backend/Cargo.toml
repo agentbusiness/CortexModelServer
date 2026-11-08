@@ -1,0 +1,26 @@
+[package]
+name = "cc-serve"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.94"
+publish = false
+description = "CortexModelServer serve@1 plugin: GPUs, lanes, plan, fit, calibration and the cluster's totals."
+
+# Own workspace: the plugin builds (and ships) on its own.
+[workspace]
+
+[[bin]]
+name = "cc-serve"
+path = "src/main.rs"
+
+[dependencies]
+cc-protocol = { path = "../../../protocol", features = ["memory", "mesh", "model", "serve", "service", "system"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+toml = "0.9"
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "process", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+sha2 = "0.10"

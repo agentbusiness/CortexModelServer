@@ -1,0 +1,1273 @@
+//! The model server: lanes, their records, their live readings, the plan, and the cluster.
+//!
+//! Everything kept is in the graph (the memory plugin), written through `graph`'s ordered
+//! outbox exactly as CortexTerm's plugins do:
+//!
+//! - `(:Gpu {key: uuid})-[:ON]->(:Machine)`: name, backend, index; memory is temporal.
+//! - `(:Engine {key: plugin})-[:ON]->(:Machine)`: version is temporal.
+//! - `(:Recipe {key: id})-[:ON]->(:Machine)`: name, engine, origin, kind (the shipped recipe it is).
+//! - `(:Lane {key: id})-[:ON]->(:Machine)`, `-[:ON_GPU]->(:Gpu)`, `-[:RUNS]->(:Recipe)`,
+//!   `-[:IN]->(:Engine)`: every setting is temporal, so each change keeps its history; a removed
+//!   lane is retired.
+//! - `(:Calibration {key: lane})-[:OF]->(:Lane)`: measured speeds, temporal.
+//! - Streams: `model.served` (one record per served call, 30 days), `model.lanes.events` (lane
+//!   added, changed, removed, by whom; 365 days), `serve.minutes` (this computer each minute,
+//!   90 days), `serve.cluster.minutes` (the mesh each minute, 90 days).
+//! - `(:Declined {key: <recipe>-g<gpu>})-[:ON]->(:Machine)`: a planned lane removed by hand; the plan
+//!   does not bring it back (until the plan is reset).
+//!
+//! Live readings (`serve.sample`, every `sample_s`) are not stored per sample, as CortexTerm's
+//! `system.sample`; what is kept is the minute summary.
+
+use crate::graph::{self, Batch, Props, r};
+use crate::{fit, gpus, plan, recipes, stats, util};
+use cc_protocol::contracts::frame::{LaneSpec, LanesResult, LanesSetParams};
+use cc_protocol::contracts::mesh::{Card, PeersResult};
+use cc_protocol::contracts::model::{LiveMetrics, ModelInfo, Progress, SlotsResult};
+use cc_protocol::contracts::serve::*;
+use cc_protocol::contracts::lifecycle::{ProbeCheck, ProbeReport};
+use cc_protocol::{Ctx, RpcError, codes};
+use serde_json::{Value, json};
+use std::collections::{BTreeSet, HashMap};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+use tokio_util::sync::CancellationToken;
+
+const SOFTWARE: &str = "cortexmodelserver";
+
+/// What a lane is doing now (read from its engine and the frame).
+#[derive(Debug, Clone, Default)]
+struct Live {
+    state: String,
+    loaded: bool,
+    slots: u32,
+    busy: u32,
+    queued: u32,
+    ctx: u32,
+    tok_s: f64,
+    prefill_tok_s: f64,
+    family: String,
+    quant: String,
+}
+
+#[derive(Default)]
+struct State {
+    recipes: Vec<Recipe>,
+    hardware: gpus::Hardware,
+    gpus: Vec<Gpu>,
+    lanes: Vec<LaneSettings>,
+    /// Planned lanes removed by hand (`<recipe>-g<gpu>`): the plan leaves them out.
+    declined: BTreeSet<String>,
+    live: HashMap<String, Live>,
+    wants: Vec<Want>,
+    engines: Vec<Engine>,
+    plan_notes: Vec<String>,
+    cluster: Cluster,
+    loaded: bool,
+}
+
+pub struct Server {
+    ctx: OnceLock<Ctx>,
+    home: PathBuf,
+    recipes_dir: PathBuf,
+    sample: Duration,
+    reserve: u64,
+    state: Mutex<State>,
+    stats: Mutex<stats::Stats>,
+    started: std::sync::atomic::AtomicBool,
+    /// Lanes being warmed now, and when each was last tried (ms).
+    warming: Mutex<HashMap<String, u64>>,
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn invalid(message: impl Into<String>) -> RpcError {
+    RpcError::invalid_params(message.into())
+}
+
+fn parse<T: serde::de::DeserializeOwned>(params: Value) -> Result<T, RpcError> {
+    let params = if params.is_null() { json!({}) } else { params };
+    serde_json::from_value(params).map_err(|error| invalid(error.to_string()))
+}
+
+fn to_value<T: serde::Serialize>(value: &T) -> Result<Value, RpcError> {
+    serde_json::to_value(value).map_err(|error| RpcError::internal(error.to_string()))
+}
+
+impl Server {
+    pub fn new(home: PathBuf, recipes_dir: PathBuf) -> Arc<Server> {
+        Arc::new(Server {
+            ctx: OnceLock::new(),
+            home,
+            recipes_dir,
+            sample: Duration::from_secs(2),
+            reserve: 2 << 30,
+            state: Mutex::new(State::default()),
+            stats: Mutex::new(stats::Stats::default()),
+            started: std::sync::atomic::AtomicBool::new(false),
+            warming: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub fn attach(&self, ctx: &Ctx) {
+        let _ = self.ctx.set(ctx.clone());
+    }
+
+    fn ctx(&self) -> Result<&Ctx, RpcError> {
+        self.ctx.get().ok_or_else(|| RpcError::new(codes::UNAVAILABLE, "the server is starting").retryable())
+    }
+
+    fn config(&self) -> Value {
+        self.ctx.get().map(Ctx::config).unwrap_or(Value::Null)
+    }
+
+    fn reserve(&self) -> u64 {
+        self.config().get("reserve_bytes").and_then(Value::as_u64).unwrap_or(self.reserve)
+    }
+
+    fn sample_every(&self) -> Duration {
+        self.config().get("sample_s").and_then(Value::as_u64).map(|s| Duration::from_secs(s.clamp(1, 60))).unwrap_or(self.sample)
+    }
+
+    pub fn probe(&self) -> ProbeReport {
+        let recipes = recipes::load(&self.recipes_dir);
+        let ok = !recipes.is_empty();
+        ProbeReport {
+            ok,
+            checks: vec![ProbeCheck {
+                name: "recipes".into(),
+                ok,
+                detail: if ok { format!("{} recipes", recipes.len()) } else { format!("no recipe in {}", self.recipes_dir.display()) },
+                ms: 0,
+            }],
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Start
+
+    /// Load what is kept, measure the hardware, run the lanes, then keep sampling.
+    pub fn start(self: &Arc<Self>, stop: CancellationToken) {
+        if self.started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let server = self.clone();
+        tokio::spawn(async move {
+            let Some(ctx) = server.ctx.get().cloned() else { return };
+            graph::connect(ctx.clone()).await;
+            server.load().await;
+            graph::set_ready();
+            server.refresh_hardware().await;
+            server.refresh_wants().await;
+            server.follow_plan("start").await;
+            if let Err(error) = server.apply().await {
+                tracing::warn!(error = %error.message, "the lanes could not be set at start; trying again with the next minute");
+            }
+            server.run(stop).await;
+        });
+    }
+
+    async fn load(&self) {
+        let mut recipes = recipes::load(&self.recipes_dir);
+        let declined: BTreeSet<String> = graph::query_all("MATCH (d:Declined) WHERE d.ended_ms IS NULL AND (d.state IS NULL OR d.state <> 'gone') RETURN d.key", json!({}))
+            .await
+            .map(|rows| rows.iter().filter_map(|row| row.first().and_then(Value::as_str).map(str::to_owned)).collect())
+            .unwrap_or_default();
+        let lanes = match graph::query_all(
+            "MATCH (l:Lane) WHERE l.ended_ms IS NULL AND (l.state IS NULL OR l.state <> 'gone') RETURN l.key, l.recipe, l.gpu, l.slots, l.ctx, l.cache_ram_mib, l.checkpoints, l.kv_type, l.speculative, l.idle_unload_s, l.pinned, l.lend, l.tags, l.manual ORDER BY l.key",
+            json!({}),
+        )
+        .await
+        {
+            Ok(rows) => rows.iter().filter_map(|row| lane_of_row(row)).collect(),
+            Err(error) => {
+                tracing::info!(%error, "no lanes kept yet");
+                Vec::new()
+            }
+        };
+        recipes.sort_by(|a, b| a.engine.cmp(&b.engine).then(a.id.cmp(&b.id)));
+        {
+            let mut state = lock(&self.state);
+            state.recipes = recipes;
+            state.lanes = lanes;
+            state.declined = declined;
+            state.loaded = true;
+        }
+        // What the lanes served in the last day.
+        let since = util::now_ms().saturating_sub(86_400_000);
+        if let Ok(entries) = graph::stream_read("model.served", since).await {
+            let mut stats = lock(&self.stats);
+            for entry in entries {
+                stats.restore(entry.at_ms, &entry.value);
+            }
+        }
+        self.record_recipes();
+    }
+
+    async fn refresh_hardware(&self) {
+        let Ok(ctx) = self.ctx() else { return };
+        let hardware = gpus::measure(ctx, &self.home).await;
+        let engines = engines(ctx).await;
+        {
+            let mut state = lock(&self.state);
+            let backends: BTreeSet<String> = hardware.gpus.iter().map(|gpu| gpu.backend.clone()).collect();
+            let installed: BTreeSet<String> = engines.iter().filter(|engine| engine.enabled).map(|engine| engine.id.clone()).collect();
+            recipes::mark(&mut state.recipes, &backends, &installed);
+            state.gpus = hardware.gpus.clone();
+            state.hardware = hardware.clone();
+            state.engines = engines.clone();
+        }
+        let Some(machine) = graph::machine() else { return };
+        let mut batch = Batch::new();
+        for gpu in &hardware.gpus {
+            let unit = batch.unit();
+            unit.node("Gpu", gpu.uuid.clone()).p("name", gpu.name.clone()).p("backend", gpu.backend.clone()).p("index", gpu.index as u64).p("unified", gpu.unified).t("memory_bytes", gpu.memory_bytes);
+            unit.edge(r("Gpu", gpu.uuid.clone()), "ON", machine.clone());
+        }
+        for engine in &engines {
+            let unit = batch.unit();
+            unit.node("Engine", engine.id.clone()).t("version", engine.version.clone()).t("enabled", engine.enabled);
+            unit.edge(r("Engine", engine.id.clone()), "ON", machine.clone());
+        }
+        graph::put(batch);
+    }
+
+    fn record_recipes(&self) {
+        let Some(machine) = graph::machine() else { return };
+        let recipes = lock(&self.state).recipes.clone();
+        let mut batch = Batch::new();
+        for recipe in &recipes {
+            let unit = batch.unit();
+            unit.node("Recipe", recipe.id.clone()).p("name", recipe.name.clone()).p("engine", recipe.engine.clone()).p("origin", recipe.origin.clone()).p("kind", recipe.kind.clone()).ps("repo", &recipe.repo).ps("revision", &recipe.revision);
+            unit.edge(r("Recipe", recipe.id.clone()), "ON", machine.clone());
+        }
+        graph::put(batch);
+    }
+
+    /// What the Cortex apps on this computer use: the models their cards list (the cards of
+    /// local members), each matched to the recipe that serves the same model.
+    async fn refresh_wants(&self) {
+        let Ok(ctx) = self.ctx() else { return };
+        let Some(peers) = peers(ctx).await else { return };
+        let recipes = lock(&self.state).recipes.clone();
+        let mut wants = Vec::new();
+        for peer in &peers.peers {
+            if !peer.member.local {
+                continue;
+            }
+            let Some(card) = &peer.card else { continue };
+            if card.software == SOFTWARE {
+                continue;
+            }
+            for model in &card.models {
+                let recipe = match_recipe(&recipes, &model.model_id, &model.family, &model.tags).map(|recipe| recipe.id.clone()).unwrap_or_default();
+                wants.push(Want { app: card.software.clone(), model_id: model.model_id.clone(), family: model.family.clone(), tags: model.tags.clone(), recipe, loaded: model.loaded });
+            }
+        }
+        wants.sort_by(|a, b| (&a.app, &a.model_id).cmp(&(&b.app, &b.model_id)));
+        wants.dedup();
+        lock(&self.state).wants = wants;
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Lanes
+
+    fn recipe(&self, id: &str) -> Option<Recipe> {
+        lock(&self.state).recipes.iter().find(|recipe| recipe.id == id).cloned()
+    }
+
+    fn gpu(&self, index: u32) -> Option<Gpu> {
+        lock(&self.state).gpus.iter().find(|gpu| gpu.index == index).cloned()
+    }
+
+    /// The engine config and environment of a lane: the recipe's config with the lane's settings
+    /// written through the recipe's keys, and the GPU selection.
+    fn spec(&self, lane: &LaneSettings, recipe: &Recipe, gpu: Option<&Gpu>) -> LaneSpec {
+        let mut config = recipe.config.clone();
+        if !config.is_object() {
+            config = json!({});
+        }
+        let keys = &recipe.keys;
+        let mut set = |key: &str, value: Value| {
+            if !key.is_empty()
+                && let Value::Object(fields) = &mut config
+            {
+                fields.insert(key.to_owned(), value);
+            }
+        };
+        // Slots left at 0 by a recipe whose engine fits them itself stay the engine's choice.
+        if lane.slots > 0 || recipe.slots_default > 0 {
+            set(&keys.slots, json!(fit::slots_of(recipe, lane)));
+        }
+        let ctx = fit::ctx_of(recipe, lane);
+        if ctx > 0 {
+            set(&keys.ctx, json!(ctx));
+        }
+        if let Some(mib) = lane.cache_ram_mib {
+            set(&keys.cache_ram, json!(mib));
+        }
+        if let Some(checkpoints) = lane.checkpoints {
+            set(&keys.checkpoints, json!(checkpoints));
+        }
+        if let Some(kv) = &lane.kv_type {
+            set(&keys.kv_type, json!(kv));
+        }
+        if lane.speculative == Some(false) && !keys.speculative.is_empty() {
+            let off = match recipe.config.get(&keys.speculative) {
+                Some(Value::Bool(_)) => json!(false),
+                Some(Value::Number(_)) => json!(0),
+                _ => json!("off"),
+            };
+            set(&keys.speculative, off);
+        }
+        // A server keeps its models loaded: a lane unloads when idle only when it was set to.
+        let idle = match lane.idle_unload_s {
+            Some(seconds) if seconds > 0 && !lane.pinned => u64::from(seconds),
+            _ => 315_360_000,
+        };
+        set(&keys.idle_unload_s, json!(idle));
+        // Every lane gets a memory ceiling: lanes never plan for the whole GPU. The lane's context
+        // bounds what it allocates; the ceiling leaves the engine room for what it keeps aside
+        // beyond the recipe's estimate (its own reserves, snapshots), a quarter and 1 GiB more.
+        let planned = fit::total(recipe, lane);
+        set(&keys.memory_limit, json!(planned + planned / 4 + (1 << 30)));
+        let env = gpu.map(gpus::lane_env).unwrap_or_default().into_iter().collect();
+        LaneSpec { id: lane.id.clone(), plugin: recipe.engine.clone(), config, env }
+    }
+
+    /// Tell the frame which lanes run (all of them; unchanged ones keep serving).
+    async fn apply(&self) -> Result<LanesResult, RpcError> {
+        let ctx = self.ctx()?.clone();
+        let lanes = lock(&self.state).lanes.clone();
+        let mut specs = Vec::new();
+        for lane in &lanes {
+            let Some(recipe) = self.recipe(&lane.recipe) else {
+                tracing::warn!(lane = %lane.id, recipe = %lane.recipe, "a lane names a recipe this version does not ship; it does not run");
+                continue;
+            };
+            let gpu = self.gpu(lane.gpu);
+            specs.push(self.spec(lane, &recipe, gpu.as_ref()));
+        }
+        let answer = ctx.call("frame.lanes.set", to_value(&LanesSetParams { lanes: specs })?).await?;
+        let result: LanesResult = serde_json::from_value(answer).map_err(|error| RpcError::internal(error.to_string()))?;
+        self.frame_states(&result);
+        self.publish_changed();
+        Ok(result)
+    }
+
+    fn frame_states(&self, result: &LanesResult) {
+        let mut state = lock(&self.state);
+        for lane in &result.lanes {
+            state.live.entry(lane.id.clone()).or_default().state = lane.state.clone();
+        }
+        let known: BTreeSet<String> = result.lanes.iter().map(|lane| lane.id.clone()).collect();
+        state.live.retain(|id, _| known.contains(id));
+    }
+
+    /// Record a lane's settings (every setting temporal: its history stays).
+    fn record_lane(&self, lane: &LaneSettings, recipe: &Recipe, by: &str, op: &str) {
+        let gpu_uuid = self.gpu(lane.gpu).map(|gpu| gpu.uuid);
+        if let Some(machine) = graph::machine() {
+            let mut batch = Batch::new();
+            let unit = batch.unit();
+            let node = unit.node("Lane", lane.id.clone());
+            node.p("recipe", lane.recipe.clone())
+                .p("engine", recipe.engine.clone())
+                .t("gpu", lane.gpu as u64)
+                .t("slots", lane.slots as u64)
+                .t("ctx", lane.ctx as u64)
+                .t("pinned", lane.pinned)
+                .t("lend", lane.lend)
+                .t("manual", lane.manual)
+                .pl("tags", lane.tags.clone());
+            node.t("cache_ram_mib", lane.cache_ram_mib.map(|v| json!(v)).unwrap_or(json!(-1)));
+            node.t("checkpoints", lane.checkpoints.map(|v| json!(v)).unwrap_or(json!(-1)));
+            node.t("kv_type", lane.kv_type.clone().unwrap_or_default());
+            node.t("speculative", match lane.speculative {
+                Some(true) => "on",
+                Some(false) => "off",
+                None => "",
+            });
+            node.t("idle_unload_s", lane.idle_unload_s.map(|v| json!(v)).unwrap_or(json!(-1)));
+            unit.edge(r("Lane", lane.id.clone()), "ON", machine.clone());
+            unit.edge(r("Lane", lane.id.clone()), "RUNS", r("Recipe", recipe.id.clone()));
+            unit.edge(r("Lane", lane.id.clone()), "IN", r("Engine", recipe.engine.clone()));
+            if let Some(uuid) = gpu_uuid {
+                unit.edge(r("Lane", lane.id.clone()), "ON_GPU", r("Gpu", uuid));
+            }
+            graph::put(batch);
+        }
+        graph::append("model.lanes.events", vec![json!({"op": op, "lane": lane.id, "recipe": lane.recipe, "gpu": lane.gpu, "slots": lane.slots, "ctx": lane.ctx, "by": by})], 365);
+    }
+
+    fn retire_lane(&self, lane: &LaneSettings, by: &str) {
+        graph::retire(vec![r("Lane", lane.id.clone())], "removed");
+        graph::append("model.lanes.events", vec![json!({"op": "remove", "lane": lane.id, "recipe": lane.recipe, "by": by})], 365);
+        lock(&self.stats).forget(&lane.id);
+    }
+
+    /// A planned lane removed by hand: the plan leaves it out from now on.
+    fn decline(&self, lane: &LaneSettings) {
+        let key = format!("{}-g{}", lane.recipe, lane.gpu);
+        lock(&self.state).declined.insert(key.clone());
+        if let Some(machine) = graph::machine() {
+            let mut batch = Batch::new();
+            let unit = batch.unit();
+            unit.node("Declined", key.clone()).p("recipe", lane.recipe.clone()).p("gpu", lane.gpu as u64);
+            unit.edge(r("Declined", key), "ON", machine);
+            graph::put(batch);
+        }
+    }
+
+    /// Check `settings` and fill what is left to the recipe; the lane's id from the recipe and
+    /// GPU when empty.
+    fn settle(&self, mut settings: LaneSettings, replaces: &str) -> Result<(LaneSettings, Recipe, Fit), RpcError> {
+        let recipe = self.recipe(&settings.recipe).ok_or_else(|| invalid(format!("no recipe `{}`", settings.recipe)))?;
+        if !recipe.available {
+            return Err(invalid(format!("{} cannot run here: {}", recipe.name, recipe.reason)));
+        }
+        let gpu = self.gpu(settings.gpu).ok_or_else(|| invalid(format!("this computer has no GPU {}", settings.gpu)))?;
+        if settings.slots == 0 {
+            settings.slots = recipe.slots_default;
+        }
+        if settings.slots > 0 {
+            settings.slots = settings.slots.min(recipe.slots_max.max(1));
+        }
+        if settings.ctx == 0 {
+            settings.ctx = recipe.ctx_default;
+        }
+        if recipe.ctx_max > 0 {
+            settings.ctx = settings.ctx.min(recipe.ctx_max);
+        }
+        if settings.id.is_empty() {
+            let lanes = lock(&self.state).lanes.clone();
+            let base: String = format!("{}-g{}", recipe.id, gpu.index).chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
+            let base: String = base.trim_matches('-').chars().take(60).collect();
+            let mut id = base.clone();
+            let mut n = 2;
+            while lanes.iter().any(|lane| lane.id == id) {
+                id = format!("{base}-{n}");
+                n += 1;
+            }
+            settings.id = id;
+        }
+        if !settings.id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') || settings.id.len() > 64 {
+            return Err(invalid("a lane id is 1 to 64 of [a-z0-9-]"));
+        }
+        let fit = self.fit_of(&settings, &recipe, &gpu, replaces);
+        Ok((settings, recipe, fit))
+    }
+
+    fn fit_of(&self, settings: &LaneSettings, recipe: &Recipe, gpu: &Gpu, replaces: &str) -> Fit {
+        let state = lock(&self.state);
+        let others: u64 = state
+            .lanes
+            .iter()
+            .filter(|lane| lane.gpu == gpu.index && lane.id != replaces && lane.id != settings.id)
+            .filter_map(|lane| state.recipes.iter().find(|r| r.id == lane.recipe).map(|r| fit::total(r, lane)))
+            .sum();
+        fit::check(recipe, settings, gpu, gpus::usable(gpu, self.reserve()), others)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The plan
+
+    fn planned(&self) -> plan::Output {
+        let state = lock(&self.state);
+        let manual: Vec<LaneSettings> = state.lanes.iter().filter(|lane| lane.manual).cloned().collect();
+        // Memory other programs hold on each GPU: on a Mac the models the apps here keep loaded
+        // themselves (unified memory has no per-process reading), on a GPU card what it reports
+        // in use beyond this server's loaded lanes.
+        let mut taken = std::collections::BTreeMap::new();
+        for gpu in &state.gpus {
+            let bytes = if gpu.unified {
+                state
+                    .wants
+                    .iter()
+                    .filter(|want| want.loaded)
+                    .filter_map(|want| state.recipes.iter().find(|r| r.id == want.recipe))
+                    .map(|recipe| fit::total(recipe, &LaneSettings::default()))
+                    .sum::<u64>()
+            } else {
+                let ours: u64 = state
+                    .lanes
+                    .iter()
+                    .filter(|lane| lane.gpu == gpu.index && state.live.get(&lane.id).is_some_and(|live| live.loaded))
+                    .filter_map(|lane| state.recipes.iter().find(|r| r.id == lane.recipe).map(|r| fit::total(r, lane)))
+                    .sum();
+                gpu.used_bytes.saturating_sub(ours)
+            };
+            taken.insert(gpu.index, bytes);
+        }
+        plan::plan(plan::Input { recipes: &state.recipes, gpus: &state.gpus, reserve: self.reserve(), wants: &state.wants, manual, taken, declined: &state.declined })
+    }
+
+    /// Set the planned lanes when they differ from the running ones (manual lanes stay).
+    async fn follow_plan(&self, by: &str) -> bool {
+        let output = self.planned();
+        let current = lock(&self.state).lanes.clone();
+        let changes = plan::changes(&current, &output.lanes);
+        lock(&self.state).plan_notes = output.notes.clone();
+        if changes.is_empty() {
+            return false;
+        }
+        for change in &changes {
+            match change.op.as_str() {
+                "remove" => self.retire_lane(&change.lane, by),
+                op => {
+                    if let Some(recipe) = self.recipe(&change.lane.recipe) {
+                        self.record_lane(&change.lane, &recipe, by, op);
+                    }
+                }
+            }
+        }
+        lock(&self.state).lanes = output.lanes;
+        tracing::info!(changes = changes.len(), "the plan changed the lanes");
+        true
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Live readings
+
+    async fn run(self: Arc<Self>, stop: CancellationToken) {
+        let mut tick = tokio::time::interval(self.sample_every());
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut last_minute = util::now_ms() / 60_000;
+        loop {
+            tokio::select! {
+                _ = stop.cancelled() => return,
+                _ = tick.tick() => {}
+            }
+            self.poll().await;
+            let minute = util::now_ms() / 60_000;
+            if minute != last_minute {
+                last_minute = minute;
+                self.each_minute().await;
+            }
+        }
+    }
+
+    /// Read every lane's engine and the GPUs, and publish the sample.
+    async fn poll(&self) {
+        let Ok(ctx) = self.ctx().cloned() else { return };
+        let hardware = lock(&self.state).hardware.clone();
+        let gpus = gpus::read(&ctx, &hardware).await;
+        let ids: Vec<String> = lock(&self.state).lanes.iter().map(|lane| lane.id.clone()).collect();
+        let mut readings = Vec::new();
+        for id in ids {
+            let params = json!({ cc_protocol::contracts::model::PLUGIN_PARAM: id });
+            let limit = Duration::from_secs(3);
+            let slots: Option<SlotsResult> = tokio::time::timeout(limit, ctx.call("model.slots", params.clone())).await.ok().and_then(Result::ok).and_then(|v| serde_json::from_value(v).ok());
+            let metrics: Option<LiveMetrics> = tokio::time::timeout(limit, ctx.call("model.metrics", params.clone())).await.ok().and_then(Result::ok).and_then(|v| serde_json::from_value(v).ok());
+            let needs_info = lock(&self.state).live.get(&id).is_none_or(|live| live.family.is_empty() && live.quant.is_empty());
+            let info: Option<ModelInfo> = if needs_info || slots.as_ref().is_some_and(|s| s.loaded) {
+                tokio::time::timeout(limit, ctx.call("model.info", params)).await.ok().and_then(Result::ok).and_then(|v| serde_json::from_value(v).ok())
+            } else {
+                None
+            };
+            readings.push((id, slots, metrics, info));
+        }
+        {
+            let mut state = lock(&self.state);
+            for (id, slots, metrics, info) in readings {
+                let live = state.live.entry(id).or_default();
+                if let Some(slots) = slots {
+                    live.loaded = slots.loaded;
+                    live.slots = slots.slots.len() as u32;
+                    live.busy = slots.busy;
+                    live.queued = slots.queued;
+                } else {
+                    live.loaded = false;
+                    live.busy = 0;
+                    live.queued = 0;
+                }
+                match metrics {
+                    Some(metrics) => {
+                        live.tok_s = metrics.decode_tps_aggregate;
+                        live.prefill_tok_s = metrics.prefill_tps;
+                    }
+                    None => {
+                        live.tok_s = 0.0;
+                        live.prefill_tok_s = 0.0;
+                    }
+                }
+                if let Some(info) = info {
+                    live.family = info.family;
+                    live.quant = info.quant;
+                    live.ctx = info.ctx_total;
+                    if live.slots == 0 {
+                        live.slots = info.slots;
+                    }
+                }
+            }
+            // On a Mac the GPU's memory in use is what the loaded lanes hold.
+            let mut gpus = gpus;
+            if let Some(gpu) = gpus.first_mut().filter(|gpu| gpu.unified) {
+                gpu.used_bytes = state
+                    .lanes
+                    .iter()
+                    .filter(|lane| state.live.get(&lane.id).is_some_and(|live| live.loaded))
+                    .filter_map(|lane| state.recipes.iter().find(|r| r.id == lane.recipe).map(|r| fit::total(r, lane)))
+                    .sum();
+            }
+            state.gpus = gpus;
+        }
+        let sample = self.sample_now();
+        if let Ok(value) = serde_json::to_value(&sample) {
+            ctx.publish(topics::SAMPLE, value);
+        }
+        self.warm(&ctx, &sample.lanes);
+    }
+
+    /// Load every running lane's model that is not in memory yet, so the first call finds it
+    /// warm: a chat lane gets a prewarm of a short system block (loads the weights, keeps no
+    /// conversation), an embedder and an extractor one small real call. A lane is tried again a
+    /// minute after a warm-up that did not load it.
+    fn warm(&self, ctx: &Ctx, lanes: &[LaneView]) {
+        let now = util::now_ms();
+        for lane in lanes {
+            if lane.loaded || lane.state != "active" {
+                continue;
+            }
+            let id = lane.settings.id.clone();
+            {
+                let mut warming = lock(&self.warming);
+                if warming.get(&id).is_some_and(|at| now.saturating_sub(*at) < 60_000) {
+                    continue;
+                }
+                warming.insert(id.clone(), now);
+            }
+            let (method, params) = match lane.kind.as_str() {
+                kinds::EMBED => ("model.embed", json!({"plugin": id, "texts": ["warm up"]})),
+                kinds::EXTRACT => ("model.extract", json!({"plugin": id, "relex": {"text": "The server starts.", "kinds": ["thing"]}})),
+                _ => ("model.prewarm", json!({"plugin": id, "cache_key": format!("serve-warm-{id}"), "messages": [{"role": "system", "content": "You are a helpful assistant."}], "shared_only": true, "idle_only": true})),
+            };
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                match tokio::time::timeout(Duration::from_secs(900), ctx.call(method, params)).await {
+                    Ok(Ok(_)) => tracing::info!(lane = %id, "the lane's model is loaded and warm"),
+                    Ok(Err(error)) => tracing::warn!(lane = %id, error = %error.message, "the lane's model did not load; trying again in a minute"),
+                    Err(_) => tracing::warn!(lane = %id, "the lane's warm-up did not finish in 15 minutes"),
+                }
+            });
+        }
+    }
+
+    fn views(&self) -> Vec<LaneView> {
+        let now = util::now_ms();
+        let state = lock(&self.state);
+        let stats = lock(&self.stats);
+        state
+            .lanes
+            .iter()
+            .map(|lane| {
+                let recipe = state.recipes.iter().find(|r| r.id == lane.recipe);
+                let live = state.live.get(&lane.id).cloned().unwrap_or_default();
+                let (tokens_hour, requests_hour) = stats.tokens(&lane.id, now, 60);
+                let error = if recipe.is_none() { format!("the recipe `{}` is not shipped with this version", lane.recipe) } else if live.state.starts_with("failed") || live.state.starts_with("waiting") || live.state.contains("disabled") { live.state.clone() } else { String::new() };
+                LaneView {
+                    settings: lane.clone(),
+                    name: recipe.map(|r| r.name.clone()).unwrap_or_else(|| lane.recipe.clone()),
+                    engine: recipe.map(|r| r.engine.clone()).unwrap_or_default(),
+                    origin: recipe.map(|r| r.origin.clone()).unwrap_or_default(),
+                    kind: recipe.map(|r| r.kind.clone()).unwrap_or_else(|| kinds::CHAT.into()),
+                    family: if live.family.is_empty() { recipe.map(|r| r.family.clone()).unwrap_or_default() } else { live.family.clone() },
+                    quant: live.quant.clone(),
+                    state: if live.state.is_empty() { "starting".into() } else { live.state.clone() },
+                    loaded: live.loaded,
+                    slots: if live.slots > 0 { live.slots } else { recipe.map(|r| fit::slots_of(r, lane)).unwrap_or(lane.slots) },
+                    slots_busy: live.busy,
+                    queued: live.queued,
+                    ctx: if live.ctx > 0 { live.ctx } else { recipe.map(|r| fit::ctx_of(r, lane)).unwrap_or(lane.ctx) },
+                    tok_s: live.tok_s,
+                    tokens_hour,
+                    requests_hour,
+                    memory_bytes: recipe.map(|r| fit::total(r, lane)).unwrap_or(0),
+                    error,
+                }
+            })
+            .collect()
+    }
+
+    fn totals(&self, views: &[LaneView], gpus: &[Gpu]) -> Totals {
+        let now = util::now_ms();
+        // Locks are taken one at a time here: `views` holds state then stats, so holding stats
+        // while asking for state would deadlock with it.
+        let prefill_tok_s: f64 = lock(&self.state).live.values().map(|live| live.prefill_tok_s).sum();
+        let stats = lock(&self.stats);
+        let gpu_bytes: u64 = gpus.iter().map(|gpu| gpu.memory_bytes).sum();
+        let weighted: f64 = gpus.iter().map(|gpu| gpu.util * gpu.memory_bytes as f64).sum();
+        let mut ttfts = Vec::new();
+        let mut requests_5 = 0;
+        let mut tokens_day = 0;
+        for view in views {
+            ttfts.extend(stats.ttfts(&view.settings.id, now, 5));
+            requests_5 += stats.tokens(&view.settings.id, now, 5).1;
+            tokens_day += stats.tokens(&view.settings.id, now, 24 * 60).0;
+        }
+        let state_of = |view: &LaneView| view.state.as_str().to_owned();
+        Totals {
+            gpu_util: if gpu_bytes > 0 { weighted / gpu_bytes as f64 } else { 0.0 },
+            gpu_used_bytes: gpus.iter().map(|gpu| gpu.used_bytes).sum(),
+            gpu_bytes,
+            tok_s: views.iter().map(|view| view.tok_s).sum(),
+            prefill_tok_s,
+            tokens_hour: views.iter().map(|view| view.tokens_hour).sum(),
+            tokens_day,
+            requests_min: requests_5 as f64 / 5.0,
+            ttft_ms: stats::median(ttfts),
+            slots_busy: views.iter().map(|view| view.slots_busy).sum(),
+            slots: views.iter().map(|view| view.slots).sum(),
+            queued: views.iter().map(|view| view.queued).sum(),
+            lanes_serving: views.iter().filter(|view| state_of(view) == "active").count() as u32,
+            lanes_loading: views.iter().filter(|view| matches!(view.state.as_str(), "starting" | "probing" | "new")).count() as u32,
+            lanes_failed: views.iter().filter(|view| !view.error.is_empty() || view.state.starts_with("failed") || view.state.starts_with("restarting") || view.state == "crashed").count() as u32,
+            power_w: gpus.iter().map(|gpu| gpu.power_w).sum(),
+        }
+    }
+
+    fn sample_now(&self) -> ServeSample {
+        let views = self.views();
+        let gpus = lock(&self.state).gpus.clone();
+        let totals = self.totals(&views, &gpus);
+        ServeSample { at_ms: util::now_ms(), gpus, lanes: views, totals }
+    }
+
+    async fn each_minute(&self) {
+        // The minute's summary of this computer.
+        let sample = self.sample_now();
+        let lanes: Vec<Value> = sample
+            .lanes
+            .iter()
+            .map(|lane| json!({"id": lane.settings.id, "recipe": lane.settings.recipe, "tok_s": lane.tok_s, "busy": lane.slots_busy, "slots": lane.slots, "queued": lane.queued, "tokens_hour": lane.tokens_hour, "loaded": lane.loaded}))
+            .collect();
+        graph::append("serve.minutes", vec![json!({"totals": sample.totals, "lanes": lanes, "gpus": sample.gpus.iter().map(|g| json!({"index": g.index, "util": g.util, "used_bytes": g.used_bytes, "power_w": g.power_w, "temp_c": g.temp_c})).collect::<Vec<_>>()})], 90);
+        // The mesh's.
+        self.refresh_wants().await;
+        let cluster = self.compute_cluster(&sample).await;
+        graph::append("serve.cluster.minutes", vec![json!({"totals": cluster.totals, "servers": cluster.servers, "servers_online": cluster.servers_online, "reporting": cluster.reporting, "gpus": cluster.gpus})], 90);
+        lock(&self.state).cluster = cluster;
+        // The plan follows the hardware and the apps here.
+        if minute_hardware_check(util::now_ms()) {
+            self.refresh_hardware().await;
+        }
+        let changed = self.follow_plan("plan").await;
+        let needs_apply = changed || self.lanes_missing();
+        if needs_apply && let Err(error) = self.apply().await {
+            tracing::warn!(error = %error.message, "the lanes could not be set");
+        }
+    }
+
+    /// The frame runs fewer lanes than are kept (it restarted, or a set failed).
+    fn lanes_missing(&self) -> bool {
+        let state = lock(&self.state);
+        state.lanes.iter().any(|lane| !state.live.contains_key(&lane.id))
+    }
+
+    /// Every model server of the mesh, added up from its card; this one from its own readings.
+    async fn compute_cluster(&self, own: &ServeSample) -> Cluster {
+        let Ok(ctx) = self.ctx() else { return Cluster::default() };
+        let peers = peers(ctx).await.unwrap_or_default();
+        let mut totals = own.totals.clone();
+        let mut servers = 1;
+        let mut online = 1;
+        let mut reporting = u32::from(!own.gpus.is_empty());
+        let mut gpu_count = own.gpus.len() as u32;
+        let mut weighted = own.totals.gpu_util * own.totals.gpu_bytes as f64;
+        // The cluster is the model servers: other apps (on this computer or another) are left out.
+        for peer in &peers.peers {
+            let Some(card) = &peer.card else { continue };
+            if card.software != SOFTWARE || peer.member.local {
+                continue;
+            }
+            let computer = true;
+            if computer {
+                servers += 1;
+                if peer.reachable {
+                    online += 1;
+                }
+            }
+            if !peer.reachable {
+                continue;
+            }
+            add_card(&mut totals, card, &mut weighted, &mut reporting, &mut gpu_count, computer);
+        }
+        totals.gpu_util = if totals.gpu_bytes > 0 { weighted / totals.gpu_bytes as f64 } else { 0.0 };
+        Cluster { totals, servers_online: online, servers, reporting, gpus: gpu_count, updated_ms: util::now_ms() }
+    }
+
+    fn publish_changed(&self) {
+        if let Some(ctx) = self.ctx.get()
+            && let Ok(value) = serde_json::to_value(LanesView { lanes: self.views() })
+        {
+            ctx.publish(topics::CHANGED, value);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Events
+
+    pub fn event(&self, topic: &str, data: Value) {
+        match topic {
+            "model.progress" => {
+                let lane = data.get("lane").and_then(Value::as_str).unwrap_or_default().to_owned();
+                if lane.is_empty() {
+                    return;
+                }
+                let Ok(progress) = serde_json::from_value::<Progress>(data) else { return };
+                let record = lock(&self.stats).progress(&lane, &progress, util::now_ms());
+                if let Some(record) = record {
+                    graph::append("model.served", vec![record], 30);
+                }
+            }
+            "frame.lanes.changed" => {
+                if let Ok(result) = serde_json::from_value::<LanesResult>(data) {
+                    self.frame_states(&result);
+                    self.publish_changed();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Methods
+
+    pub async fn handle(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        if !lock(&self.state).loaded && method != methods::RECIPES_LIST {
+            return Err(RpcError::new(codes::UNAVAILABLE, "the model server is starting").retryable());
+        }
+        match method {
+            methods::STATUS_GET => to_value(&self.status()),
+            methods::GPUS_LIST => to_value(&GpusResult { gpus: lock(&self.state).gpus.clone() }),
+            methods::RECIPES_LIST => {
+                let recipes = lock(&self.state).recipes.clone();
+                let recipes = if recipes.is_empty() { recipes::load(&self.recipes_dir) } else { recipes };
+                to_value(&RecipesResult { recipes })
+            }
+            methods::LANES_LIST => to_value(&LanesView { lanes: self.views() }),
+            methods::LANES_CREATE => {
+                let settings: LaneSettings = parse(params.clone())?;
+                let by = caller(&params);
+                let (mut settings, recipe, fit) = self.settle(settings, "")?;
+                if !fit.fits {
+                    return Err(invalid(format!("{} does not fit on GPU {}: {}", recipe.name, settings.gpu, fit.note)));
+                }
+                if lock(&self.state).lanes.iter().any(|lane| lane.id == settings.id) {
+                    return Err(RpcError::new(codes::CONFLICT, format!("lane `{}` exists", settings.id)));
+                }
+                settings.manual = true;
+                lock(&self.state).lanes.push(settings.clone());
+                self.record_lane(&settings, &recipe, &by, "add");
+                self.apply().await?;
+                self.view(&settings.id)
+            }
+            methods::LANES_EDIT => {
+                let params_value = params.clone();
+                let edit: LaneEditParams = parse(params)?;
+                let by = caller(&params_value);
+                if !lock(&self.state).lanes.iter().any(|lane| lane.id == edit.id) {
+                    return Err(RpcError::not_found(format!("no lane `{}`", edit.id)));
+                }
+                let mut settings = edit.settings;
+                settings.id = edit.id.clone();
+                let (mut settings, recipe, fit) = self.settle(settings, &edit.id)?;
+                if !fit.fits {
+                    return Err(invalid(format!("{} does not fit on GPU {}: {}", recipe.name, settings.gpu, fit.note)));
+                }
+                settings.manual = true;
+                {
+                    let mut state = lock(&self.state);
+                    for lane in &mut state.lanes {
+                        if lane.id == edit.id {
+                            *lane = settings.clone();
+                        }
+                    }
+                }
+                self.record_lane(&settings, &recipe, &by, "change");
+                self.apply().await?;
+                self.view(&settings.id)
+            }
+            methods::LANES_DELETE => {
+                let by = caller(&params);
+                let LaneIdParams { id } = parse(params)?;
+                let removed = {
+                    let mut state = lock(&self.state);
+                    let index = state.lanes.iter().position(|lane| lane.id == id).ok_or_else(|| RpcError::not_found(format!("no lane `{id}`")))?;
+                    state.lanes.remove(index)
+                };
+                if !removed.manual {
+                    self.decline(&removed);
+                }
+                self.retire_lane(&removed, &by);
+                self.apply().await?;
+                Ok(json!({}))
+            }
+            methods::FIT_GET => {
+                let params: FitParams = parse(params)?;
+                let replaces = params.replaces.clone();
+                let mut settings = params.settings;
+                if settings.id.is_empty() {
+                    settings.id = replaces.clone();
+                }
+                let recipe = self.recipe(&settings.recipe).ok_or_else(|| invalid(format!("no recipe `{}`", settings.recipe)))?;
+                let gpu = self.gpu(settings.gpu).ok_or_else(|| invalid(format!("this computer has no GPU {}", settings.gpu)))?;
+                let mut fit = self.fit_of(&settings, &recipe, &gpu, &replaces);
+                if !recipe.available {
+                    fit.fits = false;
+                    fit.note = recipe.reason.clone();
+                }
+                to_value(&fit)
+            }
+            methods::PLAN_GET => {
+                let output = self.planned();
+                let state = lock(&self.state);
+                let changes = plan::changes(&state.lanes, &output.lanes);
+                to_value(&Plan { lanes: output.lanes, changes, notes: output.notes })
+            }
+            methods::PLAN_RUN => {
+                // Back to the plan: lanes set by hand become the plan's again, removed ones may
+                // come back.
+                let declined: Vec<String> = {
+                    let mut state = lock(&self.state);
+                    for lane in &mut state.lanes {
+                        lane.manual = false;
+                    }
+                    std::mem::take(&mut state.declined).into_iter().collect()
+                };
+                if !declined.is_empty() {
+                    graph::retire(declined.iter().map(|key| r("Declined", key.clone())).collect(), "plan reset");
+                }
+                self.follow_plan(&caller(&params)).await;
+                self.apply().await?;
+                to_value(&LanesView { lanes: self.views() })
+            }
+            methods::CALIBRATE_RUN => {
+                let CalibrateParams { lane } = parse(params)?;
+                to_value(&self.calibrate(&lane).await?)
+            }
+            methods::CLUSTER_GET => {
+                let sample = self.sample_now();
+                let cluster = self.compute_cluster(&sample).await;
+                lock(&self.state).cluster = cluster.clone();
+                to_value(&cluster)
+            }
+            methods::HISTORY_READ => {
+                let params: HistoryParams = parse(params)?;
+                to_value(&self.history(params).await?)
+            }
+            other => Err(RpcError::unknown_method(other)),
+        }
+    }
+
+    fn view(&self, id: &str) -> Result<Value, RpcError> {
+        let view = self.views().into_iter().find(|view| view.settings.id == id).ok_or_else(|| RpcError::not_found(format!("no lane `{id}`")))?;
+        to_value(&view)
+    }
+
+    fn status(&self) -> ServeStatus {
+        let views = self.views();
+        let state = lock(&self.state);
+        let gpus = state.gpus.clone();
+        let engines = state.engines.clone();
+        let wants = state.wants.clone();
+        let chip = state.hardware.chip.clone();
+        drop(state);
+        let totals = self.totals(&views, &gpus);
+        ServeStatus { node: String::new(), name: chip, platform: util::platform().into(), gpus, lanes: views, engines, wants, totals }
+    }
+
+    async fn history(&self, params: HistoryParams) -> Result<History, RpcError> {
+        let topic = match params.scope.as_str() {
+            "cluster" => "serve.cluster.minutes",
+            "node" | "lane" => "serve.minutes",
+            other => return Err(invalid(format!("scope `{other}`: cluster, node or lane"))),
+        };
+        let range = params.range_s.clamp(60, 90 * 86_400);
+        let since = util::now_ms().saturating_sub(range * 1000);
+        let entries = graph::stream_read(topic, since).await.map_err(|error| RpcError::new(codes::UNAVAILABLE, error).retryable())?;
+        // At most about 360 points: minutes are averaged into buckets for long ranges.
+        let bucket_ms = ((range * 1000) / 360).max(60_000);
+        let mut points: Vec<HistoryPoint> = Vec::new();
+        let mut current: Option<(u64, Vec<Totals>)> = None;
+        for entry in entries {
+            let totals: Option<Totals> = if params.scope == "lane" {
+                entry.value.get("lanes").and_then(Value::as_array).and_then(|lanes| lanes.iter().find(|lane| lane.get("id").and_then(Value::as_str) == Some(params.id.as_str()))).map(|lane| Totals {
+                    tok_s: lane.get("tok_s").and_then(Value::as_f64).unwrap_or(0.0),
+                    slots_busy: lane.get("busy").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    slots: lane.get("slots").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    queued: lane.get("queued").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    tokens_hour: lane.get("tokens_hour").and_then(Value::as_u64).unwrap_or(0),
+                    ..Totals::default()
+                })
+            } else {
+                entry.value.get("totals").cloned().and_then(|value| serde_json::from_value(value).ok())
+            };
+            let Some(totals) = totals else { continue };
+            let bucket = entry.at_ms / bucket_ms * bucket_ms;
+            match &mut current {
+                Some((at, list)) if *at == bucket => list.push(totals),
+                _ => {
+                    if let Some((at, list)) = current.take() {
+                        points.push(HistoryPoint { at_ms: at, totals: average(&list) });
+                    }
+                    current = Some((bucket, vec![totals]));
+                }
+            }
+        }
+        if let Some((at, list)) = current {
+            points.push(HistoryPoint { at_ms: at, totals: average(&list) });
+        }
+        Ok(History { points })
+    }
+
+    /// Measure chat lanes for real: one call alone (decode, prefill, first token), then every slot
+    /// at once (the lane's total).
+    async fn calibrate(&self, only: &str) -> Result<CalibrationResult, RpcError> {
+        let ctx = self.ctx()?.clone();
+        let lanes: Vec<LaneView> = self.views().into_iter().filter(|view| view.kind == kinds::CHAT && (only.is_empty() || view.settings.id == only)).collect();
+        if lanes.is_empty() {
+            return Err(RpcError::not_found(if only.is_empty() { "no chat lane to calibrate".to_owned() } else { format!("no chat lane `{only}`") }));
+        }
+        let mut results = Vec::new();
+        for lane in lanes {
+            let id = lane.settings.id.clone();
+            let call = |n: usize| {
+                let ctx = ctx.clone();
+                let id = id.clone();
+                async move {
+                    let params = json!({
+                        "plugin": id,
+                        "messages": [{"role": "user", "content": format!("Write {} numbered sentences about how rivers shape valleys. Plain text.", 12 + n)}],
+                        "max_tokens": 192,
+                        "sampling": {"temperature": 0.0, "top_p": 1.0, "top_k": 1},
+                        "thinking": {"enabled": false},
+                        "priority": "background",
+                        "cache_key": format!("calibrate-{id}-{n}"),
+                    });
+                    let started = std::time::Instant::now();
+                    let answer = ctx.call("model.chat", params).await?;
+                    Ok::<(Value, f64), RpcError>((answer, started.elapsed().as_secs_f64()))
+                }
+            };
+            let single = call(0).await;
+            let mut calibration = Calibration { lane: id.clone(), recipe: lane.settings.recipe.clone(), at_ms: util::now_ms(), ..Calibration::default() };
+            match single {
+                Ok((answer, _)) => {
+                    let usage = &answer["usage"];
+                    let number = |name: &str| usage.get(name).and_then(Value::as_f64).unwrap_or(0.0);
+                    if number("decode_ms") > 0.0 {
+                        calibration.decode_tok_s = number("completion_tokens") / number("decode_ms") * 1000.0;
+                    }
+                    if number("prefill_ms") > 0.0 {
+                        calibration.prefill_tok_s = (number("prompt_tokens") - number("cached_tokens")).max(0.0) / number("prefill_ms") * 1000.0;
+                    }
+                    calibration.ttft_ms = number("queue_ms") + number("prefill_ms");
+                }
+                Err(error) => calibration.error = error.message,
+            }
+            if calibration.error.is_empty() {
+                let slots = lane.slots.max(1) as usize;
+                let started = std::time::Instant::now();
+                let mut set = tokio::task::JoinSet::new();
+                for n in 1..=slots {
+                    set.spawn(call(n));
+                }
+                let mut generated = 0.0;
+                while let Some(done) = set.join_next().await {
+                    if let Ok(Ok((answer, _))) = done {
+                        generated += answer["usage"]["completion_tokens"].as_f64().unwrap_or(0.0);
+                    }
+                }
+                let wall = started.elapsed().as_secs_f64();
+                if wall > 0.0 {
+                    calibration.aggregate_tok_s = generated / wall;
+                }
+            }
+            if let Some(_machine) = graph::machine() {
+                let mut batch = Batch::new();
+                let unit = batch.unit();
+                unit.node("Calibration", id.clone())
+                    .t("decode_tok_s", calibration.decode_tok_s)
+                    .t("prefill_tok_s", calibration.prefill_tok_s)
+                    .t("aggregate_tok_s", calibration.aggregate_tok_s)
+                    .t("ttft_ms", calibration.ttft_ms)
+                    .p("recipe", calibration.recipe.clone())
+                    .ps("error", &calibration.error);
+                unit.edge(r("Calibration", id.clone()), "OF", r("Lane", id.clone()));
+                graph::put(batch);
+            }
+            results.push(calibration);
+        }
+        Ok(CalibrationResult { results })
+    }
+}
+
+/// Re-measure the hardware every 10 minutes (a GPU added or taken out, drivers updated).
+fn minute_hardware_check(now_ms: u64) -> bool {
+    (now_ms / 60_000) % 10 == 0
+}
+
+fn caller(params: &Value) -> String {
+    let caller = params.get("caller");
+    let name = caller.and_then(|c| c.get("name")).and_then(Value::as_str).unwrap_or_default();
+    let app = caller.and_then(|c| c.get("app")).and_then(Value::as_str).unwrap_or_default();
+    match (name.is_empty(), app.is_empty()) {
+        (true, true) => "this computer".into(),
+        (false, _) => name.to_owned(),
+        (true, false) => app.to_owned(),
+    }
+}
+
+fn lane_of_row(row: &[Value]) -> Option<LaneSettings> {
+    let text = |i: usize| row.get(i).and_then(Value::as_str).unwrap_or_default().to_owned();
+    let number = |i: usize| row.get(i).and_then(Value::as_i64);
+    let flag = |i: usize, default: bool| row.get(i).and_then(Value::as_bool).unwrap_or(default);
+    let optional = |i: usize| number(i).filter(|v| *v >= 0).map(|v| v as u32);
+    let id = text(0);
+    let recipe = text(1);
+    if id.is_empty() || recipe.is_empty() {
+        return None;
+    }
+    let kv = text(7);
+    let speculative = match text(8).as_str() {
+        "on" => Some(true),
+        "off" => Some(false),
+        _ => None,
+    };
+    Some(LaneSettings {
+        id,
+        recipe,
+        gpu: number(2).unwrap_or(0).max(0) as u32,
+        slots: number(3).unwrap_or(0).max(0) as u32,
+        ctx: number(4).unwrap_or(0).max(0) as u32,
+        cache_ram_mib: optional(5),
+        checkpoints: optional(6),
+        kv_type: (!kv.is_empty()).then_some(kv),
+        speculative,
+        idle_unload_s: optional(9),
+        pinned: flag(10, false),
+        lend: flag(11, true),
+        tags: row.get(12).and_then(Value::as_array).map(|tags| tags.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default(),
+        manual: flag(13, false),
+    })
+}
+
+/// The recipe that serves the model an app's card lists: the same weights (the model id names
+/// the repository), else the same family and a shared tag; on a Mac the uzu recipe first.
+fn match_recipe<'a>(recipes: &'a [Recipe], model_id: &str, family: &str, tags: &[String]) -> Option<&'a Recipe> {
+    let id = model_id.to_lowercase();
+    let usable: Vec<&Recipe> = recipes.iter().filter(|recipe| recipe.available).collect();
+    let by_weights = usable.iter().find(|recipe| {
+        let repo = recipe.repo.to_lowercase();
+        let tail = repo.rsplit('/').next().unwrap_or_default().to_owned();
+        !id.is_empty() && (id == repo || id == tail || id.contains(&tail) || tail.contains(&id))
+    });
+    if let Some(recipe) = by_weights {
+        return Some(recipe);
+    }
+    let mut same: Vec<&&Recipe> = usable.iter().filter(|recipe| (family.is_empty() || recipe.family.eq_ignore_ascii_case(family)) && recipe.tags.iter().any(|t| tags.contains(t))).collect();
+    same.sort_by_key(|recipe| (recipe.engine != "model-uzu", !recipe.auto));
+    same.first().map(|recipe| **recipe)
+}
+
+async fn peers(ctx: &Ctx) -> Option<PeersResult> {
+    let answer = tokio::time::timeout(Duration::from_secs(5), ctx.call("mesh.peers", json!({}))).await.ok()?.ok()?;
+    serde_json::from_value(answer).ok()
+}
+
+async fn engines(ctx: &Ctx) -> Vec<Engine> {
+    // The installed plugins of the `model` category (every unit, also those with no lane yet).
+    let answer = ctx.call("frame.plugins.list", json!({})).await.unwrap_or(Value::Null);
+    let mut out: Vec<Engine> = Vec::new();
+    for unit in answer.get("units").and_then(Value::as_array).into_iter().flatten() {
+        if unit.get("category").and_then(Value::as_str) != Some("model") {
+            continue;
+        }
+        let id = unit.get("id").and_then(Value::as_str).unwrap_or_default().to_owned();
+        if id.is_empty() || out.iter().any(|engine| engine.id == id) {
+            continue;
+        }
+        out.push(Engine { id, version: unit.get("version").and_then(Value::as_str).unwrap_or_default().to_owned(), enabled: unit.get("enabled").and_then(Value::as_bool).unwrap_or(true) });
+    }
+    if out.is_empty() {
+        for plugin in answer.get("plugins").and_then(Value::as_array).into_iter().flatten() {
+            if plugin.get("category").and_then(Value::as_str) != Some("model") {
+                continue;
+            }
+            let id = plugin.get("plugin").and_then(Value::as_str).unwrap_or_default().to_owned();
+            if !id.is_empty() && !out.iter().any(|engine| engine.id == id) {
+                out.push(Engine { id, version: plugin.get("build").and_then(Value::as_str).unwrap_or_default().to_owned(), enabled: plugin.get("state").and_then(Value::as_str) != Some("disabled") });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// A member's card added to the totals. A computer's GPUs count once (an app on this computer
+/// shares its GPU, which this computer's readings already hold).
+fn add_card(totals: &mut Totals, card: &Card, weighted: &mut f64, reporting: &mut u32, gpu_count: &mut u32, computer: bool) {
+    if computer && !card.gpus.is_empty() {
+        *reporting += 1;
+        *gpu_count += card.gpus.len() as u32;
+        for gpu in &card.gpus {
+            totals.gpu_bytes += gpu.memory_bytes;
+            totals.gpu_used_bytes += gpu.used_bytes;
+            *weighted += gpu.util * gpu.memory_bytes as f64;
+            totals.power_w += gpu.power_w;
+        }
+    }
+    match &card.serving {
+        Some(serving) => {
+            totals.tok_s += serving.tok_s;
+            totals.prefill_tok_s += serving.prefill_tok_s;
+            totals.tokens_hour += serving.tokens_hour;
+            totals.tokens_day += serving.tokens_day;
+            totals.requests_min += serving.requests_min;
+            totals.lanes_serving += serving.lanes_serving;
+            totals.lanes_loading += serving.lanes_loading;
+            totals.lanes_failed += serving.lanes_failed;
+            if serving.ttft_ms > 0.0 {
+                totals.ttft_ms = if totals.ttft_ms > 0.0 { (totals.ttft_ms + serving.ttft_ms) / 2.0 } else { serving.ttft_ms };
+            }
+        }
+        // An app that is not a model server: what its models run now.
+        None => {
+            totals.tok_s += card.models.iter().map(|model| model.slots_busy as f64 * model.tok_s).sum::<f64>();
+            totals.tokens_hour += card.models.iter().map(|model| model.tokens_hour).sum::<u64>();
+            totals.lanes_serving += card.models.iter().filter(|model| model.loaded).count() as u32;
+        }
+    }
+    totals.slots += card.models.iter().map(|model| model.slots).sum::<u32>();
+    totals.slots_busy += card.models.iter().map(|model| model.slots_busy).sum::<u32>();
+    totals.queued += card.models.iter().map(|model| model.queued).sum::<u32>();
+}
+
+fn average(list: &[Totals]) -> Totals {
+    let n = list.len().max(1) as f64;
+    let f = |get: fn(&Totals) -> f64| list.iter().map(get).sum::<f64>() / n;
+    let u = |get: fn(&Totals) -> u64| (list.iter().map(get).sum::<u64>() as f64 / n) as u64;
+    let s = |get: fn(&Totals) -> u32| (list.iter().map(get).sum::<u32>() as f64 / n).round() as u32;
+    Totals {
+        gpu_util: f(|t| t.gpu_util),
+        gpu_used_bytes: u(|t| t.gpu_used_bytes),
+        gpu_bytes: u(|t| t.gpu_bytes),
+        tok_s: f(|t| t.tok_s),
+        prefill_tok_s: f(|t| t.prefill_tok_s),
+        tokens_hour: u(|t| t.tokens_hour),
+        tokens_day: u(|t| t.tokens_day),
+        requests_min: f(|t| t.requests_min),
+        ttft_ms: f(|t| t.ttft_ms),
+        slots_busy: s(|t| t.slots_busy),
+        slots: s(|t| t.slots),
+        queued: s(|t| t.queued),
+        lanes_serving: s(|t| t.lanes_serving),
+        lanes_loading: s(|t| t.lanes_loading),
+        lanes_failed: s(|t| t.lanes_failed),
+        power_w: f(|t| t.power_w),
+    }
+}

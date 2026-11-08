@@ -1,0 +1,158 @@
+# Recipes for model-uzu (CortexCode's uzu 1763a366 with P1-P8; plugins/model-uzu), Macs only.
+#
+# Sizes are the plugin's catalog (backend/src/variants.rs, vision/mod.rs: pinned files and bytes)
+# and its fit (backend/src/fit.rs), with KV per token as the engine measures it at load on a chip
+# with the M5 matrix units, where uzu keeps attention KV in int8 (vendor patch P5): per attention
+# layer and token, K and V codes (2 x kv_heads x head_dim bytes) plus their bf16 scales
+# (2 x kv_heads x 2 bytes). On chips without matrix units uzu keeps bf16 and the fit charges
+# 2 x kv_heads x head_dim x 2 bytes instead (given per recipe below). The DFlash drafter's KV is
+# charged at bf16 from its config (the fit's draft_kv_bytes_per_token).
+#
+# compute_bytes is the fit's COMPUTE_RESERVE (3 GiB, sized for the 27B; the plugin uses it for every
+# variant). Each resident conversation also takes a fixed state from the pool, counted in pool
+# tokens (fit.rs `conversation_tokens`): ceil((1 + checkpoints) x recurrent_bytes / kv_bytes_per_token)
+# + 1024 suffix rows, checkpoints = clamp(room / 16 / recurrent_bytes, 2, 8). The vision tower, while
+# loaded, is charged against the pool too.
+#
+# Lane keys:
+# - ctx -> ctx_total: the ONE KV pool (tokens) every resident conversation shares; any one
+#   conversation may grow to min(pool, the model's context). It may only shrink the pool the fit
+#   leaves under memory_limit_bytes (CortexModelServer patch in runtime.rs). The load fails when the
+#   pool is below min(32768, model context) + one conversation's fixed state, so give at least
+#   slots x (32768 + conversation_tokens).
+# - slots -> slots: a cap on resident conversations (CortexCode sets none: as many as the pool holds;
+#   idle ones are spilled to disk). It does not shrink what is allocated.
+# - memory_limit -> memory_limit_bytes: caps the fit's budget (bytes). Each lane is one process that
+#   otherwise plans for the whole Mac (Metal working set, RAM less a quarter, the wired limit less an
+#   eighth of RAM), so set it on every lane so the lanes together fit the machine.
+# - speculative -> speculative (auto | off; only the 27B has a drafter).
+# - Not settable: kv type (uzu picks int8 or bf16 per chip), checkpoints (fitted), the prompt cache in
+#   RAM (there is none: idle conversations spill to <plugin data>/hibernated/<pid>/, bounded by
+#   hibernate_limit_bytes, default 32 GiB of disk per lane), idle unload of the model (there is none;
+#   vision_idle_unload_s, default 300, unloads only the vision tower).
+#
+# Lanes need nothing else to be told apart: each instance's spill files live in its own plugin data
+# folder, the weights in ~/.cortex-models are shared read-only (downloads hold the revision folder's
+# .download.lock), and the plugin opens no port, socket, keychain item or lock of its own.
+
+[[recipe]]
+id = "qwen3.8-27b-uzu"
+name = "Qwen3.8-27B"
+engine = "model-uzu"
+origin = "CortexCode"
+kind = "chat"
+family = "qwen3.8"
+tags = ["coding"]
+platforms = ["macos"]
+backends = ["metal"]
+# Mirai M: 4-bit weights, bundled DFlash speculator. Vision tower: the tensors under model.visual. of
+# Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 (shard 1), fetched into <dir>/vision/.
+# On disk (du of ~/.cortex-models, a stale 476 MB .part left out): 16.5 GB.
+repo = "trymirai/Qwen3.8-27B-M"
+revision = "8b878f57094a616c0ea4c214fe774af0cbfb4353"
+weights_bytes = 16486133448        # 14,532,457,872 model + 1,032,178,224 DFlash speculator + 921,497,352 vision tower
+compute_bytes = 3221225472         # COMPUTE_RESERVE 3 GiB (vision scratch, about 0.6 GB at 4 MP, comes out of the pool)
+kv_bytes_per_token = 53504         # int8 target 33,024 (16 attention layers x 4 KV heads x 256) + bf16 drafter 20,480 (5 layers); bf16 chips: 86,016
+min_gpu_bytes = 25769803777        # above 24 GiB: the plugin's [backend.machine] min_memory_bytes
+ctx_min_per_slot = 60184           # 32,768 + the largest fixed state (27,416 tokens): the pool one conversation needs
+ctx_default = 131072               # pool: 2 conversations at 32k + their fixed state (recurrent 156,893,184 B, 2-8 checkpoints: 9,822-27,416 tokens each)
+ctx_max = 262144                   # the model's context (one conversation); the fit bounds the pool
+slots_default = 2
+slots_max = 8
+vision = true
+speculative = "dflash"
+
+[recipe.config]
+variant = "qwen3.8-27b-m"
+
+[recipe.keys]
+slots = "slots"
+ctx = "ctx_total"
+cache_ram = ""
+checkpoints = ""
+kv_type = ""
+speculative = "speculative"
+idle_unload_s = ""
+memory_limit = "memory_limit_bytes"
+
+[[recipe]]
+id = "qwen3.5-4b-uzu"
+auto = false                       # CortexCode's test model: set by hand only
+name = "Qwen3.5-4B (test)"
+engine = "model-uzu"
+origin = "CortexCode"
+kind = "chat"
+family = "qwen3.5"
+tags = ["coding"]
+platforms = ["macos"]
+backends = ["metal"]
+# CortexCode's functional-test model, rendered with the Qwen3.8 template; no speculator, no vision.
+# Shares the 27B's tokenizer.json (19,989,343 B). Not installed on this Mac.
+repo = "trymirai/Qwen3.5-4B-M"
+revision = "c04a48535ccbb69c8c17417c39fb69cfeaa80274"
+weights_bytes = 2441821768         # model.safetensors
+compute_bytes = 3221225472         # COMPUTE_RESERVE 3 GiB
+kv_bytes_per_token = 16512         # int8: 8 attention layers x 4 KV heads x 256 (of 32 layers, 24 Gated DeltaNet); bf16 chips: 32,768
+min_gpu_bytes = 17179869184        # 16 GiB: weights + 3 GiB + one 32k conversation with its state fit; 8 GB Macs do not
+ctx_min_per_slot = 62512           # 32,768 + the fixed state (29,744 tokens)
+ctx_default = 131072               # pool: 2 conversations at 32k + their fixed state (recurrent 52,690,944 B, 8 checkpoints: 29,744 tokens each)
+ctx_max = 262144
+slots_default = 2
+slots_max = 8
+vision = false
+speculative = "none"
+
+[recipe.config]
+variant = "qwen3.5-4b-m"
+
+[recipe.keys]
+slots = "slots"
+ctx = "ctx_total"
+cache_ram = ""
+checkpoints = ""
+kv_type = ""
+speculative = ""
+idle_unload_s = ""
+memory_limit = "memory_limit_bytes"
+
+[[recipe]]
+id = "lfm2.5-1.2b-uzu"
+name = "LFM2.5-1.2B"
+engine = "model-uzu"
+origin = "the knowledge app"
+kind = "chat"
+family = "lfm2.5"
+tags = ["rapid"]
+platforms = ["macos"]
+backends = ["metal"]
+# The knowledge app's rapid lane (model-worker on uzu), as the plugin's lfm2.5-1.2b-m variant carries it
+# (CortexModelServer patch, fixed whatever the lane config says): greedy, 32,768 tokens per
+# conversation (min(model max 128,000, 32768)), prefill chunk 1024, 24 shared prefix snapshots,
+# llguidance JSON schema with the knowledge app's compact separators; the model's own chat template. The knowledge app
+# runs one process with one request at a time. On disk (du): 638,758,912 B.
+repo = "trymirai/LFM2.5-1.2B-Instruct-M"
+revision = "ecdf2af005f28d483cfe87549897c877e5cf69bf"
+weights_bytes = 633981000          # model.safetensors (tokenizer.json 4,733,389 B, config.json 37,022 B)
+compute_bytes = 3221225472         # COMPUTE_RESERVE 3 GiB
+kv_bytes_per_token = 6336          # int8: 6 attention layers x 8 KV heads x 64 (10 short-convolution layers hold no KV); bf16 chips: 12,288
+min_gpu_bytes = 8589934592         # 8 GiB Macs fit weights + 3 GiB + several 32k conversations
+ctx_min_per_slot = 33792
+ctx_default = 33792                # pool: 1 conversation of 32,768 + 1,024 suffix rows (no recurrent state is charged)
+ctx_max = 270336                   # 8 conversations of 33,792; one conversation never exceeds 32,768
+slots_default = 1
+slots_max = 8
+vision = false
+speculative = "none"
+
+[recipe.config]
+variant = "lfm2.5-1.2b-m"
+
+[recipe.keys]
+slots = "slots"
+ctx = "ctx_total"
+cache_ram = ""
+checkpoints = ""
+kv_type = ""
+speculative = ""
+idle_unload_s = ""
+memory_limit = "memory_limit_bytes"

@@ -1,0 +1,18 @@
+# The few items of the knowledge app's common crate that the copied embedders (src/embedding) use,
+# under the same paths (the crate renamed), so those files stay as the knowledge app has them apart
+# from that name. Not the knowledge app's crate:
+# its error type is cut down to the one variant they build (`Error::Internal`), and its log macros
+# go to `tracing`.
+[package]
+name = "embed-common"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "embed_common"
+path = "src/lib.rs"
+
+[dependencies]
+tracing = "0.1.44"

@@ -1,0 +1,40 @@
+/* settings.mesh@1: one grid of label | text | action, every line the height of a button (22px), so
+   labels, text and buttons share their centre line. */
+#cc .cx-mesh{display:flex;flex-direction:column;gap:18px;}
+#cc .cx-mesh-grid{display:grid;grid-template-columns:118px minmax(0,1fr) max-content;column-gap:16px;row-gap:8px;align-items:start;}
+#cc .cx-mesh-grid > .ap{line-height:22px;white-space:nowrap;}
+#cc .cx-mesh-grid .t{font-family:var(--font-reading);font-size:15px;line-height:22px;color:var(--ink);}
+#cc .cx-mesh-grid .v{font-family:var(--font-reading);font-size:13px;line-height:22px;color:var(--ink-2);min-width:0;overflow-wrap:anywhere;}
+#cc .cx-mesh-grid .v.faint{color:var(--ink-3);}
+#cc .cx-mesh-grid .detent,#cc .cx-mesh-grid > .sw{justify-self:end;}
+#cc .cx-mesh-grid > .sw{align-self:center;}
+#cc .cx-mesh-cell{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-height:22px;}
+#cc .cx-mesh-cell .detent{justify-self:auto;}
+#cc .cx-mesh-note{font-family:var(--font-reading);font-size:12px;line-height:18px;color:var(--ink-3);margin-top:-4px;}
+#cc .cx-mesh-note code{font-family:var(--font-mono);font-size:11px;color:var(--ink-2);}
+#cc .cx-mesh-inv{font-family:var(--font-mono);font-size:11px;line-height:16px;color:var(--ink-2);word-break:break-all;max-height:64px;overflow:auto;}
+#cc .cx-mesh-field{min-width:0;height:22px;box-sizing:border-box;}
+/* the members: one line each — pip, name, app, computer and models, how it is reached, Remove */
+#cc .cx-mesh-members{display:flex;flex-direction:column;gap:6px;}
+#cc .cx-mesh-members-head{display:flex;align-items:baseline;gap:8px;padding-bottom:6px;border-bottom:1px solid var(--rule-2);}
+#cc .cx-mesh-members-head .grow{flex:1;}
+#cc .cx-mesh-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;}
+#cc .cx-mesh-row{display:grid;grid-template-columns:5px minmax(80px,max-content) max-content minmax(0,1fr) max-content max-content;align-items:center;column-gap:12px;
+  height:34px;border-bottom:1px solid var(--rule);min-width:0;}
+#cc .cx-mesh-row>*{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+#cc .cx-mesh-pip{width:5px;height:5px;box-shadow:inset 0 0 0 1px var(--ink-3);}
+#cc .cx-mesh-pip.on{background:var(--counter);box-shadow:none;}
+#cc .cx-mesh-row-name{font-family:var(--font-reading);font-size:14.5px;color:var(--ink);max-width:240px;}
+#cc .cx-mesh-row-app{color:var(--ink-2);}
+#cc .cx-mesh-row.server .cx-mesh-row-app{color:var(--counter);}
+#cc .cx-mesh-row-detail{font-family:var(--font-reading);font-size:13px;color:var(--ink-3);}
+#cc .cx-mesh-row-where{text-align:right;}
+#cc .cx-mesh-row-remove{opacity:0;transition:opacity 120ms ease;}
+#cc .cx-mesh-row:hover .cx-mesh-row-remove,#cc .cx-mesh-row-remove:focus-visible{opacity:1;}
+#cc .cx-mesh-row.away .cx-mesh-row-name{color:var(--ink-3);}
+#cc .cx-mesh-join{grid-column:2 / 4;flex-wrap:nowrap;}
+#cc .cx-mesh-join .cx-mesh-field{flex:1;}
+/* Beside reading text the eye centres on its lowercase body, 1.5px below a capital label's middle:
+   such labels sit that much lower. Labels beside buttons and fields (capitals too) stay. */
+#cc .cx-mesh-grid > .ap:is(:has(+ .v),:has(+ .t)){position:relative;top:1.5px;}
+#cc .cx-mesh-row-app .faint{color:var(--ink-3);}

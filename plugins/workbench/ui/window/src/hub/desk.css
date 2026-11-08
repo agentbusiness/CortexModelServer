@@ -1,0 +1,114 @@
+/*
+ * The hub inside the workbench frame (#cc: the plate with its registration marks and the band),
+ * laid out as ct's Desk: the rules of ct's desk.css the hub keeps (labels, detent variants, the
+ * three columns, the machine tiles, the band items). Faces, colours, detents and dividers are the
+ * theme's; this file only lays the hub out.
+ */
+
+#cc .ct-desk{flex:1;min-height:0;display:flex;flex-direction:column;position:relative;}
+#cc .ct-desk .grow,#cc .ct-band-items .grow{flex-grow:1;}
+.ct-mono{font-family:var(--font-mono);}
+.ct-label{font-family:Archivo,"Helvetica Neue",Arial,sans-serif;font-size:9.5px;font-weight:600;letter-spacing:.17em;text-transform:uppercase;color:var(--ink-2);line-height:1.2;}
+.ct-faint{color:var(--ink-3);}
+.ct-warn,.ct-lift{color:var(--rubric-lift);}
+.ct-ok,.ct-blue{color:var(--counter);}
+.ct-reading{font-family:"Source Serif 4",Georgia,serif;font-size:14px;line-height:1.5;margin:0;color:var(--ink);white-space:pre-wrap;}
+.ct-reading-inline{font-family:"Source Serif 4",Georgia,serif;font-size:15px;}
+.ct-reading-name{font-family:"Source Serif 4",Georgia,serif;font-size:15.5px;color:var(--ink);}
+.ct-serif-title{font-family:"Source Serif 4",Georgia,serif;font-size:20px;color:var(--ink);}
+.ct-hint{font-family:"Source Serif 4",Georgia,serif;font-size:13.5px;color:var(--ink-2);margin:6px 10px;}
+
+/* the band items the Desk adds to the workbench band */
+#cc .ct-band-items{flex:1;display:flex;align-items:center;gap:8px;min-width:0;}
+#cc .detent.static{cursor:default;}
+#cc .detent.on{color:var(--ink);border-color:var(--ink-3);}
+#cc .detent.blue{color:var(--counter);}
+#cc .detent.warn{color:var(--rubric-lift);border-color:var(--rubric);}
+#cc .detent.solid{background:var(--rubric);border-color:var(--rubric);color:var(--ground);}
+#cc .detent.solid .k{color:var(--ground);opacity:.75;}
+#cc .detent.sm{height:20px;padding:0 7px;font-size:9px;}
+#cc .detent.grow{flex:1;justify-content:center;}
+.ct-icon{background:transparent;border:0;color:var(--ink-3);font:14px/1 Archivo,sans-serif;width:20px;height:20px;cursor:pointer;padding:0;}
+.ct-icon:hover{color:var(--ink);}
+.ct-x{background:transparent;border:0;color:var(--ink-3);cursor:pointer;font-size:14px;padding:0 4px;}
+.ct-x:hover{color:var(--rubric-lift);}
+.ct-link{background:transparent;border:0;padding:0;color:var(--ink-2);font:600 9px Archivo,sans-serif;letter-spacing:.16em;cursor:pointer;}
+.ct-link:hover{color:var(--ink);}
+.ct-link.hot{color:var(--rubric-lift);}
+.ct-seg{background:transparent;border:0;border-bottom:1px solid transparent;color:var(--ink-3);font:600 9.5px Archivo,sans-serif;letter-spacing:.14em;padding:2px 4px;cursor:pointer;}
+.ct-seg.on{color:var(--ink);border-bottom:1px solid var(--rubric);}
+
+/* sidebar | main | editor, each divider draggable */
+#cc .ct-work{flex:1;min-height:0;display:grid;grid-template-rows:minmax(0,1fr);}
+#cc .ct-work>.cx-divider.ct-hidden{visibility:hidden;pointer-events:none;}
+.ct-nav{padding:14px 14px 14px 0;display:flex;flex-direction:column;gap:12px;min-height:0;min-width:0;overflow:auto;}
+.ct-nav[hidden]{display:none;}
+
+.ct-main{min-width:0;min-height:0;display:flex;flex-direction:column;gap:8px;padding:10px 12px 12px;}
+
+/* the machine */
+.ct-side{padding:14px 0 12px 14px;display:flex;flex-direction:column;gap:10px;min-height:0;min-width:0;overflow:hidden;}
+.ct-side-head{display:flex;align-items:center;gap:6px;}
+.ct-tiles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+.ct-tiles.three{grid-template-columns:repeat(3,minmax(0,1fr));}
+.ct-tile{border-top:1px solid var(--rule-2);padding-top:6px;min-width:0;}
+.ct-tile-head{display:flex;font:600 9.5px Archivo,sans-serif;letter-spacing:.12em;gap:4px;white-space:nowrap;color:var(--ink);font-variant-numeric:tabular-nums;}
+.ct-tile-note{font:500 10px Archivo,sans-serif;font-variant-numeric:tabular-nums;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ct-spark{width:100%;height:22px;display:block;}
+.ct-membar{height:8px;display:flex;margin:8px 0 6px;background:var(--rule);}
+.ct-membar .used{background:var(--counter);}
+.ct-membar .comp{background:var(--rubric);}
+
+@media (max-width: 980px){
+  #cc .ct-work{grid-template-columns:minmax(0,1fr) !important;}
+  #cc .ct-work>.cx-divider,.ct-nav,.ct-side{display:none;}
+}
+
+/* the side pane: plain word toggles, no boxes */
+.ct-side-tabs{display:flex;gap:14px;padding:2px 0 6px;flex-wrap:wrap;}
+.ct-side-tab{background:transparent;border:0;padding:0 0 3px;color:var(--ink-3);font:600 9.5px Archivo,sans-serif;letter-spacing:.17em;cursor:pointer;border-bottom:1px solid transparent;}
+.ct-side-tab.on{color:var(--ink);border-bottom-color:var(--rubric);}
+.ct-side-tab.hot{color:var(--rubric-lift);}
+.ct-machine{display:flex;flex-direction:column;gap:10px;min-height:0;flex:1;}
+.ct-sideview{flex:1;min-height:0;display:flex;flex-direction:column;overflow:auto;}
+.ct-sideview-head{display:flex;align-items:center;gap:8px;padding:0 0 6px;}
+
+/* labels and the words beside them share one baseline (not centres): capitals and serif line up */
+#cc .ct-side-head,#cc .ct-tile-head{align-items:baseline;}
+#cc .ct-label{line-height:1;}
+
+/* small-capitals text controls, one size */
+#cc .ct-act,#cc .ct-seg,#cc .ct-side-tab,#cc .ct-more,#cc .ct-link{font:600 9.5px/16px Archivo,sans-serif;letter-spacing:.17em;text-transform:uppercase;height:16px;padding:0;}
+#cc .ct-act.static{cursor:default;color:var(--ink-3);}
+#cc .ct-side-tab{padding:0 0 2px;height:18px;}
+#cc .ct-side-tabs{gap:16px;padding:0 0 8px;}
+#cc .ct-seg{padding:0 2px;}
+/* the side pane and nav on the same steps */
+#cc .ct-main{padding:8px 16px 12px 16px;gap:8px;}
+#cc .ct-side{padding:12px 0 12px 16px;gap:12px;}
+#cc .ct-nav{padding:12px 16px 12px 0;gap:12px;}
+#cc .ct-tiles{gap:12px;}
+/* the sidebar uses the CortexCode sidebar's grammar (sidebar.css) */
+#cc .ct-nav.cx-sidebar{padding:0;gap:0;overflow:hidden;}
+#cc .ct-nav .cx-row{position:relative;}
+
+/* memory over time: apps (blue) and compressed (orange) stacked up to all the RAM, swap dashed */
+#cc .ct-memchart{width:100%;height:34px;display:block;margin:6px 0 4px;border-bottom:1px solid var(--rule);}
+#cc .ct-memkey{display:flex;flex-wrap:nowrap;gap:4px;white-space:nowrap;}
+#cc .ct-memkey>span{flex-shrink:0;}
+#cc .ct-memkey .app{color:var(--counter);}
+#cc .ct-memkey .comp{color:var(--rubric-lift);}
+#cc .ct-memkey .swap{color:var(--ink-3);}
+
+/* --- the band: one readout and visibly outlined actions ------------------------------------ */
+#cc .ct-band-items{display:flex;align-items:center;gap:8px;}
+#cc .ct-band-items>.grow{display:block;min-width:0;}
+#cc .ct-band-note{background:transparent;border:0;padding:0;font:600 9.5px Archivo,sans-serif;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);white-space:nowrap;}
+#cc button.ct-band-note{cursor:pointer;}
+#cc .ct-band-note.warn{color:var(--rubric-lift);}
+#cc .ct-band-note.blue{color:var(--counter);}
+#cc button.ct-band-note:hover{color:var(--ink);}
+#cc .ct-band-action{flex:0 0 auto;height:24px;white-space:nowrap;}
+#cc .ct-band-model{min-width:0;overflow:hidden;text-overflow:ellipsis;}
+#cc .ct-band-gear{display:inline-flex;align-items:center;justify-content:center;flex:0 0 24px;width:24px;height:24px;padding:0;margin-left:0;}
+@media(max-width:880px){#cc .ct-band-items{flex-basis:100%;}}

@@ -1,0 +1,43 @@
+/* The server grid: ct's cluster rules the hub keeps. They inherit the plate's Archivo labels, detents, rules and rubric. */
+.ct-computer-color{display:inline-block;width:7px;height:7px;flex:0 0 7px;background:var(--computer-color,var(--rule-2));}
+.ct-machine-offline{display:flex;flex-direction:column;align-items:flex-start;gap:12px;padding:20px 0;}
+.ct-machine-offline .ct-hint{margin:0;}
+@keyframes ct-machine-enter{from{opacity:.35;transform:translateY(5px);}to{opacity:1;transform:none;}}
+
+.ct-cluster-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;padding:24px 2px 24px 0;scrollbar-color:var(--rule-2) var(--ground);}
+.ct-cluster-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,380px),1fr));align-items:stretch;gap:20px;}
+.ct-cluster-slot{min-width:0;position:relative;}
+.ct-cluster-slot.is-placeholder:has(.ct-cluster-card[style*="fixed"]){outline:1px dashed var(--computer-color,var(--rule-2));outline-offset:-1px;background:color-mix(in srgb,var(--ink) 3%,transparent);}
+.ct-cluster-card{display:flex;flex-direction:column;gap:14px;height:100%;box-sizing:border-box;border:1px solid var(--rule-2);border-top-color:var(--computer-color);padding:14px;background:var(--ground);color:var(--ink);min-width:0;transition:border-color 140ms ease,box-shadow 180ms ease;}
+.ct-cluster-card.is-selected{outline:1px solid var(--ink-3);outline-offset:3px;}
+.ct-cluster-card.is-lifted{border-color:var(--computer-color);box-shadow:0 16px 30px color-mix(in srgb,var(--ink) 18%,transparent);cursor:grabbing;}
+.ct-cluster-card.is-lifted[style*="fixed"]{pointer-events:none;}
+.ct-cluster-card-head{display:flex;align-items:center;gap:9px;min-width:0;}
+.ct-cluster-name{padding:0;border:0;background:transparent;font:400 20px/1.3 "Source Serif 4",Georgia,serif;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;cursor:pointer;min-width:0;}
+.ct-cluster-name:hover{color:var(--rubric-lift);}
+.ct-cluster-grip{flex:0 0 24px;display:grid;place-items:center;touch-action:none;user-select:none;width:24px;height:28px;border:0;background:transparent;color:var(--ink-3);cursor:grab;padding:0;}
+.ct-cluster-grip:hover,.ct-cluster-grip[aria-pressed="true"]{color:var(--ink);}
+.ct-cluster-grip[aria-pressed="true"]{cursor:grabbing;}
+.ct-cluster-meta{display:flex;align-items:baseline;flex-wrap:wrap;gap:8px;line-height:1.5;}
+.ct-cluster-meta>span:last-child{overflow-wrap:anywhere;}
+.ct-cluster-readings{display:flex;flex-direction:column;gap:12px;}
+.ct-cluster-readings .ct-tile{min-width:0;}
+.ct-cluster-readings .ct-tile-head{flex-wrap:wrap;gap:4px;}
+.ct-cluster-readings .ct-tile-head>span:last-child{white-space:nowrap;font-variant-numeric:tabular-nums;}
+.ct-cluster-readings .ct-tile-note{white-space:normal;line-height:1.5;overflow-wrap:anywhere;}
+.ct-cluster-card.is-stale .ct-cluster-readings{opacity:.5;}
+.ct-cluster-note{font:13px/1.4 "Source Serif 4",Georgia,serif;margin:0;}
+.ct-cluster-card-foot{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:auto;padding-top:12px;border-top:1px solid var(--rule);}
+.ct-cluster-color-button{display:flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--rule-2);background:transparent;color:var(--ink-3);height:26px;padding:0 7px;cursor:pointer;}
+.ct-cluster-color-button:hover{border-color:var(--ink-3);color:var(--ink);}
+.ct-cluster-color-button>svg{width:8px;}
+.ct-cluster-swatches{position:fixed;inset:auto;margin:8px 0 0;position-area:bottom span-left;position-try-fallbacks:flip-block,flip-inline;background:var(--ground);color:var(--ink);padding:6px;border:1px solid var(--rule-2);}
+.ct-cluster-swatches:popover-open{display:flex;gap:3px;animation:ct-machine-enter 140ms ease;}
+.ct-cluster-swatches button{position:relative;display:grid;place-items:center;width:26px;height:26px;border:1px solid transparent;background:transparent;padding:4px;cursor:pointer;}
+.ct-cluster-swatches button>span{position:absolute;inset:4px;background:var(--computer-color);}
+.ct-cluster-swatches button>svg{position:relative;}
+.ct-cluster-swatches button:hover{border-color:var(--ink-3);}
+.ct-cluster-swatches button[aria-pressed="true"]{border-color:var(--ink);}
+.ct-visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0;}
+@media(max-width:700px){.ct-cluster-scroll{padding-top:16px;}.ct-cluster-grid{gap:16px;}}
+@media(prefers-reduced-motion:reduce){.ct-cluster-card{transition:none;}.ct-cluster-swatches:popover-open{animation:none;}}

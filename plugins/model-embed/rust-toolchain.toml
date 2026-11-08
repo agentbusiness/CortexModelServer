@@ -1,0 +1,5 @@
+# The Rust toolchain this folder builds with: the knowledge app's pin (1.95.0), which its embedders'
+# dependencies need (parking_lot 0.13 requires 1.95); the repository pins 1.94.1.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

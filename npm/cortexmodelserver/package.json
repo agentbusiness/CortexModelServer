@@ -1,0 +1,30 @@
+{
+  "name": "cortexmodelserver",
+  "version": "0.1.5",
+  "description": "CortexModelServer, the model server of the Cortex apps: npx cortexmodelserver downloads the app for this machine from the official releases and starts it; cortexmodelserver service runs it in the background.",
+  "type": "module",
+  "bin": {
+    "cortexmodelserver": "bin/cortexmodelserver.mjs"
+  },
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "arm64",
+    "x64"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentbusiness/CortexModelServer.git"
+  },
+  "homepage": "https://github.com/agentbusiness/CortexModelServer"
+}

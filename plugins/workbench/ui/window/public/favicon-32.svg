@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>CortexModelServer favicon, 32 px cut</title>
+  <rect width="32" height="32" fill="#14171A"/>
+  <path d="M8 8 3 16 8 24M24 8 29 16 24 24" fill="none" stroke="#E9EBEC" stroke-width="2" stroke-linecap="square"/>
+  <path d="M12 12 9.5 16 12 20M20 12 22.5 16 20 20" fill="none" stroke="#6E9BB5" stroke-width="1.5" stroke-linecap="square"/>
+  <rect x="14" y="14" width="4" height="4" fill="#E2603F" shape-rendering="crispEdges"/>
+</svg>

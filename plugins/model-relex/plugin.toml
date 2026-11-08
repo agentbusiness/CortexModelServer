@@ -1,0 +1,34 @@
+# CortexModelServer plugin manifest (plugin.toml, schema ccplugin/1). Paths are relative to this folder.
+
+[plugin]
+id = "model-relex"
+name = "Model (GLiNER-relex extractor)"
+version = "0.1.0"
+description = "GLiNER-relex large (knowledgator/gliner-relex-large-v1.0) on candle, the knowledge app's relex lane copied as is: one encoder pass gives a passage's entities and the relations between them (model.extract). Metal on macOS, CUDA when built with it, else the CPU; encoder f16, heads f32, BiLSTM on the CPU; 768-subtoken windows."
+license = "UNLICENSED"
+platforms = ["macos", "linux"]
+
+# The logic plugin: a supervised process speaking CPP/1 to the frame. It runs the model in one child
+# process of its own executable (`cc-model-relex worker`), started on the first passage and ended
+# after idle_unload_s without one. Each lane is its own instance (CORTEX_LANE, its own data folder).
+[backend]
+category = "model"
+contract = "model@1"
+dir = "backend"
+build = ["cargo", "build", "--release"]
+exec = "backend/target/release/cc-model-relex"
+swap = "drain_first"
+hello_timeout_ms = 60000
+# A first start may download the model (1.9 GB) and loading compiles the Metal kernels (8-13 s).
+probe_timeout_ms = 600000
+provides = ["model.info", "model.slots", "model.metrics", "model.extract"]
+# It calls nothing through the frame.
+uses = []
+
+# Defaults for the frame config's [plugin.config] table; a lane's settings are merged over them.
+[backend.config]
+idle_unload_s = 300         # end the worker (free the model) after this long without a passage; 0 keeps it
+threshold = 0.3             # entity threshold when a passage names none (the knowledge app's ingest)
+relation_threshold = 0.5    # relation threshold when a passage names none (the knowledge app's ingest)
+encoder_dtype = "f16"       # "f32" doubles the encoder's memory
+download = true             # fetch the pinned files into ~/.cortex-models when missing

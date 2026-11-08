@@ -1,0 +1,35 @@
+# CortexModelServer plugin manifest (plugin.toml, schema ccplugin/1): the source manager. One self-contained
+# folder (backend + settings panel), separable into its own repository and packable into a portable
+# `.ccplugin` with `cortex-pack`; the frame runs it only as an installed package.
+# Paths are relative to this folder.
+
+[plugin]
+id = "source-manager"
+name = "Source manager"
+version = "0.1.11"
+description = "Every plugin's data (prompts, texts, skills) as one git repository in the live folder: live edits committed as they settle, kept in step with the installed packages, history and revert, backup to GitHub and sharing improvements."
+license = "UNLICENSED"
+platforms = ["macos", "linux"]
+
+# The logic plugin (a Cargo workspace of its own; depends on the protocol crate by path).
+[backend]
+category = "source"
+contract = "source@1"
+dir = "backend"
+build = ["cargo", "build", "--release"]
+exec = "backend/target/release/cc-source"
+
+# UI packages: one npm workspace rooted at ui/ (own package-lock.json); each package builds
+# <dir>/dist with manifest.json {id, version, slot, entry, css}, which the frame serves.
+[ui]
+dir = "ui"
+build = ["npm", "run", "build"]
+
+# CortexModelServer: no Settings > History and no Backup & Sync (they follow the edits a chat flow
+# makes to the live data; this app has none).
+
+# Settings > Storage.
+[[ui.package]]
+dir = "ui/settings-storage"
+id = "source-manager.settings-storage"
+slot = "settings.storage@1"

@@ -1,0 +1,109 @@
+# Recipes for the `model-llama-agent` engine plugin: CortexAgent's two Gemma 4 releases with
+# CortexAgent's exact settings (CortexAgent crates/model/src/catalog_data.rs, model_catalog.rs and
+# llama_server.rs), on its llama.cpp (unslothai/llama.cpp 468ad58, b11876, with its four patches). Every lane is fitted by CortexAgent's fitter when its model loads: slots
+# 1..16 (from 16, halved until each slot gets 32k, at least 2), one unified KV pool up to the native
+# context, ubatch 2048, f16 KV (q8_0 with flash attention when f16 cannot reach the native context),
+# up to 16 checkpoints 2048 tokens apart, a host-RAM prompt cache of at most 6 GiB, MTP drafts
+# (n-max 4), --cache-reuse 0, --no-prefill-assistant, --no-context-shift, slots saved to disk.
+# A lane setting mapped through [recipe.keys] fixes (slots, kv_type) or caps (ctx, cache_ram,
+# checkpoints, memory_limit) what the fit chooses; 0 / "" leaves it to the fit.
+#
+# Sizes. weights_bytes = weights + MTP head + F16 vision projector, as installed.
+# compute_bytes = CortexAgent's fixed compute charge: two llama.cpp contexts (model and MTP head) at
+# 768 MiB each plus 384 MiB for the projector's encoder. kv_bytes_per_token is the KV cache of the
+# full-attention layers per context token at f16 (what the shared pool grows by); CortexAgent's fit
+# also charges, per context token, an attention mask of 16,384 bytes (2 contexts x 2 copies x 2 bytes
+# x ubatch 2048), and per slot a fixed sliding-window checkpoint (see each recipe).
+
+[[recipe]]
+id = "gemma-4-e4b-llama-agent"
+name = "Gemma 4 E4B (CortexAgent)"
+engine = "model-llama-agent"
+origin = "CortexAgent"
+kind = "chat"
+family = "gemma4"
+tags = ["office"]
+platforms = ["macos"]
+backends = ["metal"]
+repo = "unsloth/gemma-4-E4B-it-qat-GGUF"
+revision = "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265"
+# gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf 4,215,695,776 + mtp-gemma-4-E4B-it.gguf 59,678,016
+# + mmproj-F16.gguf 990,372,672
+weights_bytes = 5265746464
+compute_bytes = 2013265920
+# From the GGUF header (read from the installed file): 42 blocks, the last 18 share earlier caches,
+# so 24 own one; 4 of them full attention (2 KV heads x 512 for K and for V): 4 x 2 x 1024 x 2 B.
+# The 20 sliding-window layers (window 512, 2 x 256) hold pad256(512 + 2048) = 2560 cells per slot,
+# 40,960 B per cell: 100 MiB per slot and per checkpoint.
+kv_bytes_per_token = 16384
+# Fixed device charge about 7.3 GB (weights, head, projector and compute) plus the 3 GiB CortexAgent
+# reserves below Metal's working set: a 16 GB Mac. (CortexAgent's own advisory floor is 7 GiB
+# unified, but no fit stays within budget there.)
+min_gpu_bytes = 17179869184
+ctx_default = 131072              # native context; the fit lowers it to what memory holds
+ctx_max = 131072
+slots_default = 0                 # 0 = CortexAgent's fit (2..16 by memory)
+slots_max = 16
+vision = true
+speculative = "mtp"
+
+[recipe.config]
+variant = "gemma_4_e4b_it_q4km"
+vision = true
+
+[recipe.keys]
+slots = "slots"
+ctx = "ctx"
+cache_ram = "cache_ram"           # MiB, capped at 6144
+checkpoints = "checkpoints"       # capped at 16
+kv_type = "kv_type"               # "" | "f16" | "q8_0"
+speculative = ""
+idle_unload_s = "idle_unload_s"
+memory_limit = "memory_limit"     # bytes of device memory; 3 GiB are reserved below it
+
+[[recipe]]
+id = "gemma-4-26b-a4b-llama-agent"
+name = "Gemma 4 26B-A4B (CortexAgent)"
+engine = "model-llama-agent"
+origin = "CortexAgent"
+kind = "chat"
+family = "gemma4"
+tags = ["office"]
+platforms = ["macos"]
+backends = ["metal"]
+repo = "unsloth/gemma-4-26B-A4B-it-qat-GGUF"
+revision = "7b92b5b28818151e8669af2e45e88d6086f490dd"
+# gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf 14,249,047,104 + mtp-gemma-4-26B-A4B-it.gguf 251,939,328
+# + mmproj-F16.gguf 1,193,058,784
+weights_bytes = 15694045216
+compute_bytes = 2013265920
+# From google/gemma-4-26B-A4B-it config.json (the GGUF is not installed here to read): 30 layers,
+# 5 full attention (2 global KV heads x 512) at positions 5, 11, 17, 23, 29: 5 x 2 x 1024 x 2 B.
+# The 25 sliding-window layers (window 1024, 8 KV heads x 256) hold pad256(1024 + 2048) = 3072 cells
+# per slot, 204,800 B per cell: 600 MiB per slot and per checkpoint, so the fit keeps fewer
+# checkpoints here (at least 2).
+kv_bytes_per_token = 20480
+# Fixed device charge about 17.7 GB plus two slots' sliding windows plus the 3 GiB reserve: a 32 GB
+# Mac. (CortexAgent's advisory floor is 15 GiB unified; its picker recommends 26B-A4B once Metal's
+# working set holds weights and projector, but the fit only stays within budget from 32 GB.)
+min_gpu_bytes = 34359738368
+ctx_default = 262144              # native context; the fit lowers it to what memory holds
+ctx_max = 262144
+slots_default = 0                 # 0 = CortexAgent's fit (2..16 by memory)
+slots_max = 16
+vision = true
+speculative = "mtp"
+
+[recipe.config]
+variant = "gemma_4_26b_a4b_it_q4km"
+vision = true
+
+[recipe.keys]
+slots = "slots"
+ctx = "ctx"
+cache_ram = "cache_ram"
+checkpoints = "checkpoints"
+kv_type = "kv_type"
+speculative = ""
+idle_unload_s = "idle_unload_s"
+memory_limit = "memory_limit"

@@ -1,0 +1,44 @@
+# Recipes of the model-relex engine plugin (schema: README.md). The knowledge app's extractor lane, with
+# the knowledge app's settings: thresholds 0.3 / 0.5 (its ingest's), encoder f16, a 5-minute idle stop.
+
+[[recipe]]
+id = "gliner-relex-large-relex"
+name = "GLiNER-relex large"
+engine = "model-relex"
+origin = "the knowledge app"
+kind = "extract"
+family = "gliner-relex"
+tags = ["bilstm"]
+platforms = ["macos", "linux"]
+backends = ["metal", "cuda", "cpu"]     # cuda only in a build with `--features cuda`
+repo = "knowledgator/gliner-relex-large-v1.0"
+revision = "4aedc9226a5ac9e2f6b5ea3e91c1ee577c88a290"
+# Files 1,875,022,429 bytes (present in ~/.cortex-models: 1.83 GiB). Resident: the encoder's 434 M
+# weights in f16 (868 MB) and the heads' 33 M in f32 (131 MB).
+weights_bytes = 1000000000
+# The knowledge app's measurement: a 768-subtoken window peaks at 2.2 GB of working memory.
+compute_bytes = 2200000000
+kv_bytes_per_token = 0
+min_gpu_bytes = 4294967296
+ctx_default = 0
+ctx_max = 0
+slots_default = 1
+slots_max = 1                           # one passage at a time per lane; more lanes for more
+vision = false
+speculative = "none"
+
+[recipe.config]
+threshold = 0.3
+relation_threshold = 0.5
+encoder_dtype = "f16"
+idle_unload_s = 300
+
+[recipe.keys]
+slots = ""
+ctx = ""
+cache_ram = ""
+checkpoints = ""
+kv_type = ""
+speculative = ""
+idle_unload_s = "idle_unload_s"
+memory_limit = ""

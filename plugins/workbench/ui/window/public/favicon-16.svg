@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <title>CortexModelServer favicon, 16 px cut</title>
+  <rect width="16" height="16" fill="#14171A"/>
+  <!-- at 16 px the inner chevrons go; the outer pair and the live node stay -->
+  <path d="M4.5 3.5 1.8 8 4.5 12.5M11.5 3.5 14.2 8 11.5 12.5" fill="none" stroke="#E9EBEC" stroke-width="1.4" stroke-linecap="square"/>
+  <rect x="6" y="6" width="4" height="4" fill="#E2603F" shape-rendering="crispEdges"/>
+</svg>

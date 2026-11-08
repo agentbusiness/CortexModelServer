@@ -1,0 +1,250 @@
+# Recipes for model-llama (llama.cpp 468ad58 with CortexTerm's 4 patches; plugins/model-llama).
+#
+# Sizes come from the plugin's catalog.rs (pinned files). KV per token is computed from each
+# model's architecture at the recipe's default kv type:
+#
+# - Gemma 4 (GGUF metadata of the E4B file; google/gemma-4-E2B-it config.json for E2B): only the
+#   layers before the shared-KV layers hold a cache (llama.cpp `n_layer_kv_from_start`). Of those,
+#   the full-attention layers grow with context (counted in kv_bytes_per_token); the sliding-window
+#   layers hold n_swa * slots + ubatch cells whatever the context (llama-kv-cache-iswa.cpp with
+#   --kv-unified, counted in compute_bytes).
+#     E4B: 42 layers, 18 shared -> 24 with KV: 4 full (2 KV heads x 512) + 20 SWA (2 x 256),
+#          window 512. Full: 4 * 2 * (512 + 512) * 2 B = 16384 B/token (f16).
+#          SWA: 20 * 2 * (256 + 256) * 2 B = 40960 B/cell; 2 slots: (2 * 512 + 2048) cells = 126 MB;
+#          1 slot: 2560 cells = 105 MB.
+#     E2B: 35 layers, 20 shared -> 15 with KV: 3 full (1 KV head x 512) + 12 SWA (1 x 256).
+#          Full: 3 * 1 * 1024 * 2 B = 6144 B/token. SWA: 12288 B/cell * 3072 = 38 MB.
+# - Qwen3.8-27B (64 layers: 48 Gated DeltaNet + 16 full attention, 4 KV heads x 256; from the
+#   same model's trymirai config.json): 16 * 4 * (256 + 256) elements per token; q8_0 is 34 bytes
+#   per 32 elements: 34816 B/token (65536 at f16). The DeltaNet state is fixed per slot
+#   (48 layers * 48 heads * 128 * 128 * 4 B + conv state, about 157 MB a slot), in compute_bytes.
+#
+# compute_bytes are estimates (SWA or recurrent state + llama.cpp compute buffers + the drafter's
+# own cache) until the serve plugin's calibration measures them.
+#
+# ctx: for Gemma (`--kv-unified`) ctx is the ONE pool all slots share (KV = kv_bytes_per_token *
+# ctx); for Qwen ctx is per slot (KV = kv_bytes_per_token * ctx * slots). Exactly as the origins run
+# them.
+#
+# Not here: LFM2.5-1.2B. LiquidAI publishes an official GGUF repo (LiquidAI/LFM2.5-1.2B-Instruct-GGUF),
+# but no app runs LFM on llama.cpp, so there are no origin settings to copy (the knowledge app runs it on uzu).
+
+[[recipe]]
+id = "gemma-4-e4b-qat-llama"
+name = "Gemma 4 E4B"
+engine = "model-llama"
+origin = "CortexTerm / the knowledge app"
+kind = "chat"
+family = "gemma4"
+tags = ["office"]
+platforms = ["macos", "linux"]
+backends = ["metal", "cuda", "vulkan"]
+repo = "unsloth/gemma-4-E4B-it-qat-GGUF"
+revision = "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265"
+weights_bytes = 4275373792        # UD-Q4_K_XL 4_215_695_776 + MTP head 59_678_016
+compute_bytes = 900000000         # SWA 126 MB + compute buffers (ubatch 2048) + MTP head cache (estimate)
+kv_bytes_per_token = 16384        # f16, full-attention layers only; ctx is the shared pool
+min_gpu_bytes = 9663676416        # 9 GiB: CortexTerm offers E4B above 8 GiB
+ctx_default = 32768
+ctx_max = 131072
+slots_default = 2
+slots_max = 8
+vision = false
+speculative = "mtp"
+
+[recipe.config]
+variant = "gemma-4-e4b-qat"
+ctx = 32768
+parallel = 2
+ubatch = 2048
+kv_type = "f16"
+draft_max = 4
+cache_ram = 1024
+checkpoints = 2
+
+[recipe.keys]
+slots = "parallel"
+ctx = "ctx"
+cache_ram = "cache_ram"          # MiB
+checkpoints = "checkpoints"
+kv_type = "kv_type"
+speculative = ""
+idle_unload_s = "idle_unload_s"
+memory_limit = ""
+
+[[recipe]]
+id = "gemma-4-e2b-qat-llama"
+name = "Gemma 4 E2B"
+engine = "model-llama"
+origin = "CortexTerm"
+kind = "chat"
+family = "gemma4"
+tags = ["office"]
+platforms = ["macos", "linux"]
+backends = ["metal", "cuda", "vulkan"]
+repo = "unsloth/gemma-4-E2B-it-qat-GGUF"
+revision = "66a399f68ddd113b06dff02fca9523e55465d11d"
+weights_bytes = 2679606624        # UD-Q4_K_XL 2_620_370_976 + MTP head 59_235_648
+compute_bytes = 600000000         # SWA 38 MB + compute buffers (ubatch 2048) + MTP head cache (estimate)
+kv_bytes_per_token = 6144         # f16, full-attention layers only; ctx is the shared pool
+min_gpu_bytes = 4294967296        # 4 GiB: the plugin's smallest usable GPU
+ctx_default = 32768
+ctx_max = 131072
+slots_default = 2
+slots_max = 8
+vision = false
+speculative = "mtp"
+
+[recipe.config]
+variant = "gemma-4-e2b-qat"
+ctx = 32768
+parallel = 2
+ubatch = 2048
+kv_type = "f16"
+draft_max = 4
+cache_ram = 1024
+checkpoints = 2
+
+[recipe.keys]
+slots = "parallel"
+ctx = "ctx"
+cache_ram = "cache_ram"
+checkpoints = "checkpoints"
+kv_type = "kv_type"
+speculative = ""
+idle_unload_s = "idle_unload_s"
+memory_limit = ""
+
+[[recipe]]
+id = "gemma-4-e4b-qat-report-llama"
+auto = false              # a long report lane is set by hand
+name = "Gemma 4 E4B, report 131k"
+engine = "model-llama"
+origin = "the knowledge app"
+kind = "chat"
+family = "gemma4"
+tags = ["office"]
+platforms = ["macos", "linux"]
+backends = ["metal", "cuda", "vulkan"]
+repo = "unsloth/gemma-4-E4B-it-qat-GGUF"
+revision = "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265"
+weights_bytes = 4275373792
+compute_bytes = 880000000         # SWA 105 MB (1 slot) + compute buffers + MTP head cache (estimate)
+kv_bytes_per_token = 16384        # 131072 tokens: 2.15 GB
+min_gpu_bytes = 12884901888       # 12 GiB: 4.3 GB weights + 2.15 GB KV + buffers + margin
+ctx_default = 131072
+ctx_max = 131072
+slots_default = 1
+slots_max = 1
+vision = false
+speculative = "mtp"
+
+[recipe.config]
+variant = "gemma-4-e4b-qat-report"
+ctx = 131072
+parallel = 1
+ubatch = 2048
+kv_type = "f16"
+draft_max = 4
+cache_ram = 1024
+checkpoints = 2
+max_tokens = 16384                # answer cap, reasoning included (generate_thinking.rs)
+greedy = true                     # temperature 0, top_k 1
+
+[recipe.keys]
+slots = ""
+ctx = "ctx"
+cache_ram = "cache_ram"
+checkpoints = "checkpoints"
+kv_type = "kv_type"
+speculative = ""
+idle_unload_s = "idle_unload_s"
+memory_limit = ""
+
+[[recipe]]
+id = "qwen3.8-27b-q4-llama"
+name = "Qwen3.8-27B GGUF Q4"
+engine = "model-llama"
+origin = "CortexCode"
+kind = "chat"
+family = "qwen3.8"
+tags = ["coding"]
+platforms = ["linux"]
+backends = ["cuda", "vulkan"]
+repo = "unsloth/Qwen3.8-27B-GGUF"
+revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
+# UD-Q4_K_XL 17_559_178_144 + DFlash 2 drafter 1_143_006_816 (z-lab/Qwen3.8-27B-DFlash2-GGUF
+# @2d9571f8ce46e151f61c6499c99dee6079e1d610) + mmproj-F16 927_607_488 (on the GPU)
+weights_bytes = 19629792448
+compute_bytes = 1200000000        # DeltaNet state 2 x 157 MB + compute buffers (ubatch 512) + drafter cache (estimate)
+kv_bytes_per_token = 34816        # q8_0 (65536 at f16); per slot: KV = this * ctx * slots
+min_gpu_bytes = 24696061952       # 23 GiB (a 24 GB card), CortexCode's rule
+ctx_default = 32768
+ctx_max = 262144
+ctx_per_slot = true
+slots_default = 2
+slots_max = 4
+vision = true
+speculative = "dflash2"
+
+[recipe.config]
+variant = "qwen3.8-27b-q4"
+ctx = 32768
+parallel = 2
+ubatch = 512
+kv_type = "q8_0"
+draft_max = 7
+
+[recipe.keys]
+slots = "parallel"
+ctx = "ctx"
+cache_ram = "cache_ram"          # MiB; unset = llama-server's default, as CortexCode runs it
+checkpoints = "checkpoints"      # unset = llama-server's default
+kv_type = "kv_type"
+speculative = ""
+idle_unload_s = "idle_unload_s"
+memory_limit = ""
+
+[[recipe]]
+id = "qwen3.8-27b-q3-llama"
+name = "Qwen3.8-27B GGUF Q3"
+engine = "model-llama"
+origin = "CortexCode"
+kind = "chat"
+family = "qwen3.8"
+tags = ["coding"]
+platforms = ["linux"]
+backends = ["cuda", "vulkan"]
+repo = "unsloth/Qwen3.8-27B-GGUF"
+revision = "4ca720788d1e01f1bff70c033e0d0028fd02e502"
+# UD-Q3_K_XL 13_146_393_504 + DFlash 2 drafter 1_143_006_816; mmproj-F16 (927_607_488) stays in
+# host RAM (--no-mmproj-offload) and is not counted
+weights_bytes = 14289400320
+compute_bytes = 900000000         # DeltaNet state 2 x 157 MB + compute buffers (ubatch 512) + drafter cache (estimate)
+kv_bytes_per_token = 34816
+min_gpu_bytes = 16106127360       # 15 GiB (a 16 GB card), CortexCode's rule
+ctx_default = 32768
+ctx_max = 262144
+ctx_per_slot = true
+slots_default = 2
+slots_max = 4
+vision = true
+speculative = "dflash2"
+
+[recipe.config]
+variant = "qwen3.8-27b-q3"
+ctx = 32768
+parallel = 2
+ubatch = 512
+kv_type = "q8_0"
+draft_max = 7
+
+[recipe.keys]
+slots = "parallel"
+ctx = "ctx"
+cache_ram = "cache_ram"
+checkpoints = "checkpoints"
+kv_type = "kv_type"
+speculative = ""
+idle_unload_s = "idle_unload_s"
+memory_limit = ""

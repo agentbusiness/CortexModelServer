@@ -1,0 +1,98 @@
+# Ternary Bonsai 2 27B on PrismML's llama.cpp (plugins/model-bonsai), with CortexCode's settings.
+#
+# The numbers are the engine's own fit (backend/src/fit.rs) on a machine whose budget is at least
+# the 12 GB the engine never passes (MAX_TOTAL_BYTES): weights, a 0.5 GiB compute reserve, one
+# recurrent state (156,893,184 B) per sequence (resident conversations + 1 shared-block seed), its
+# context checkpoints, the MTP drafter's snapshots and 0.25 GiB compute (MTP build only), and a q8_0
+# KV pool sized to what is left, at most 131,072 tokens. Each lane is one process and plans its own
+# 12 GB; set memory_limit per lane so the lanes together fit the machine.
+#
+# weights_bytes includes the vision projector (Ternary-Bonsai-2-27B-mmproj-Q8_0.gguf, 629,246,976 B,
+# prism-ml/Ternary-Bonsai-2-27B-gguf@b072e1d3b35a0a630cece372c2127528e0994386) and compute_bytes its
+# encoder reserve (1 GiB): both load only while images are used (unloaded after 300 s) and are
+# outside the engine's 12 GB plan. With vision = "off" in the lane config, subtract 1,702,988,800 B.
+#
+# Every variant also installs tokenizer.json (12,809,320 B) from
+# Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0 beside the weights.
+#
+# Lane keys: ctx_total may only shrink the fitted pool (the CortexModelServer patch in engine.rs);
+# slots caps resident conversations (1..fitted) but does not shrink what is allocated; KV type
+# (q8_0), checkpoints (fitted) and drafting (by variant) are fixed; there is no idle unload.
+
+[[recipe]]
+id = "ternary-bonsai2-27b-mtp-bonsai"
+name = "Ternary Bonsai 2 27B (MTP)"
+engine = "model-bonsai"
+origin = "CortexCode"
+kind = "chat"
+family = "qwen3.8"
+tags = ["coding"]
+platforms = ["macos"]
+backends = ["metal"]
+# PrismML's PQ2_0 file unchanged plus Qwen3.8's MTP layer (Q8_0), trained further on Bonsai 2's output.
+# File: Ternary-Bonsai-2-27B-PQ2_0-MTP-Q8_0.gguf, 7,657,489,728 B,
+# sha256 3cb3f0056d2e34ee44245a64396004a21f8492573d6ce1266ec4b7222c131dd4.
+repo = "ProCreations/Ternary-Bonsai-2-27B-MTP"
+revision = "efffdea64c1f9e93cc7fa6bb24f72ae9d66ecf51"
+weights_bytes = 8286736704         # 7,657,489,728 GGUF (drafter inside) + 629,246,976 projector
+compute_bytes = 2977300480         # 0.5 GiB compute + 5 x 156.9 MB states/checkpoints + 0.58 GB drafter + 1 GiB encoder
+kv_bytes_per_token = 36992         # q8_0, 16 attention layers + the MTP layer, 4 KV heads x 512
+min_gpu_bytes = 17179869184        # 16 GB Macs fit one conversation of about 34k tokens
+ctx_default = 65536                # the fit at 12 GB: 1 resident conversation, 3 checkpoints
+ctx_max = 65536                    # the 12 GB cap: ctx_total cannot grow the pool
+slots_default = 1
+slots_max = 1
+vision = true
+speculative = "mtp"
+
+[recipe.config]
+variant = "bonsai2-27b-pq2-mtp"
+
+[recipe.keys]
+slots = "slots"
+ctx = "ctx_total"
+cache_ram = ""
+checkpoints = ""
+kv_type = ""
+speculative = ""
+idle_unload_s = ""
+memory_limit = "memory_limit_bytes"
+
+[[recipe]]
+id = "ternary-bonsai2-27b-bonsai"
+name = "Ternary Bonsai 2 27B"
+engine = "model-bonsai"
+origin = "CortexCode"
+kind = "chat"
+family = "qwen3.8"
+tags = ["coding"]
+platforms = ["macos"]
+backends = ["metal"]
+# PrismML's own pack: ternary weights in 2-bit slots (2.13 bits per weight), no drafts.
+# File: Ternary-Bonsai-2-27B-PQ2_0.gguf, 7,206,168,928 B,
+# sha256 3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1.
+repo = "prism-ml/Ternary-Bonsai-2-27B-gguf"
+revision = "b072e1d3b35a0a630cece372c2127528e0994386"
+weights_bytes = 7835415904         # 7,206,168,928 GGUF + 629,246,976 projector
+compute_bytes = 3336437760         # 0.5 GiB compute + 11 x 156.9 MB states/checkpoints + 1 GiB encoder
+kv_bytes_per_token = 34816         # q8_0, 16 attention layers x 4 KV heads x 512
+min_gpu_bytes = 17179869184
+ctx_default = 71680                # the fit at 12 GB: 2 resident conversations, 4 checkpoints each
+ctx_max = 71680
+slots_default = 2
+slots_max = 2
+vision = true
+speculative = "none"
+
+[recipe.config]
+variant = "bonsai2-27b-pq2"
+
+[recipe.keys]
+slots = "slots"
+ctx = "ctx_total"
+cache_ram = ""
+checkpoints = ""
+kv_type = ""
+speculative = ""
+idle_unload_s = ""
+memory_limit = "memory_limit_bytes"

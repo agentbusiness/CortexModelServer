@@ -1,0 +1,35 @@
+# CortexModelServer plugin manifest (plugin.toml, schema ccplugin/1). Paths are relative to this folder.
+
+[plugin]
+id = "model-embed"
+name = "Model (embeddings)"
+version = "0.1.0"
+description = "Texts to vectors (model.embed) with the knowledge app's embedder copied as is: bekko-embedding-v1-a8m (ModernBERT, 384 dims, mean-pooled, L2-normalized) on candle, Metal on macOS, else the CPU."
+license = "UNLICENSED"
+platforms = ["macos", "linux"]
+
+# The logic plugin: a supervised process speaking CPP/1 to the frame, the model in process. Each lane
+# is its own instance (CORTEX_LANE, its own data folder) serving the model its `model` names.
+[backend]
+category = "model"
+contract = "model@1"
+dir = "backend"
+build = ["cargo", "build", "--release"]
+exec = "backend/target/release/cc-model-embed"
+swap = "drain_first"
+hello_timeout_ms = 60000
+# A first start may download the model (246 MB for bekko).
+probe_timeout_ms = 600000
+provides = ["model.info", "model.slots", "model.metrics", "model.embed"]
+# It calls nothing through the frame.
+uses = []
+
+# Defaults for the frame config's [plugin.config] table; a lane's settings are merged over them.
+[backend.config]
+model = "bekko-embedding-v1-a8m"   # the only model
+batch_size = 32                    # texts per encoder pass (ordered by length for ModernBERT)
+threads = 4                        # CPU threads (capped at half the cores)
+prefer_gpu = true                  # ModernBERT on Metal when there is one
+max_input_tokens = 512             # tokens read per text at most
+idle_unload_s = 300                # drop the model after this long without a request; 0 keeps it
+download = true                    # fetch the pinned files into ~/.cortex-models when missing

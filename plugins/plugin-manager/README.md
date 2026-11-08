@@ -1,0 +1,45 @@
+# Plugin manager (`plugin-manager`)
+
+Settings > Plugins (`settings.plugins@1`): every installed plugin as one unit (from `frame.plugins.list` `units`) with its package version (shown without its build tag, which says where it came from: a release, the app's build, or a build of yours), Disable / Enable (`frame.plugins.disable` / `enable`) and, after an install, Roll back (`frame.plugins.rollback {plugin}`); every service with Restart (`frame.plugins.swap`, the same version) and the swap's steps; every UI package with Reload; at the top, Reset all plugins (`update.reset_plan` lists what it does to each plugin in a confirmation sheet, `update.reset` does it: every plugin back to its official release, the user's changes dropped; the panel's own plugin is reinstalled too, so the sheet keeps its start time in the slot's state and reads the outcome back from `update.status`). Also, in the brand band (`workbench.band@1`), a service that is not running (crashed, restarting, missing; a disabled plugin's service is left out): nothing while every service runs, so a problem is never silent and the band stays empty when all is well; pressing it opens Settings > Plugins.
+
+One self-contained plugin folder, separable into its own repository (only `cc-protocol` and `@cortex/sdk` come from outside):
+
+| Path | What |
+|---|---|
+| `plugin.toml` | identity, build commands and outputs, UI packages and their slots, shell modules, source location |
+| `ui/` | one npm workspace (own `package-lock.json`, `@cortex/sdk` as a local dependency): `ui/band-status` (workbench.band@1), `ui/settings-plugins` (settings.plugins@1); each package builds `dist/` with `manifest.json` |
+
+## Build and run
+
+```sh
+cd ui && npm ci && npm run build && npm test     # after the SDK is built (cd ../../ui/sdk && npm run build)
+cortex-pack build plugins/plugin-manager --install       # a dev build, installed into the running app
+```
+
+The frame runs plugins only from installed packages; `--install` (or `cx plugin install <file>`) hot-swaps the UI packages together; Settings > Plugins disables and enables the whole plugin.
+
+## Unreleased source changes (0.1.7)
+
+Settings groups a service with its installed package by backend category or by the hello's
+plugin/module id matching the package id or a declared shell module. File Browser's
+`filebrowser-native` transfer service appears in File Browser's details, controlled by its one
+enable/disable switch. This uses existing frame metadata; no contract or lifecycle changes.
+
+The reset comparison distinguishes release references, bundled references and installed plugins
+with neither. Missing reference packages stay installed and are excluded from reset. Manual
+update results follow live updater status, include failed updates and qualify the result when
+release coverage is incomplete. Source reviewed only; no build, install or live verification.
+
+## Service status (0.1.9)
+
+The band derives expected backend services from the installed plugin units and reported services.
+It does not require CortexCode-only categories (`tools`, `vcs`, `chatflow-coding`, `agents`,
+`browser`) in CortexModelServer. Enabled backends that are missing or crashed still appear; intentionally
+disabled and standby providers do not create missing-service warnings. Unit changes refresh the band.
+
+## Current plugin list and settings layout (0.1.10)
+
+Card Host is a retired UI-only component replaced by the Desk. The current-plugin list and
+release comparison exclude it; no installed files are deleted or changed. Other plugins with
+missing release information remain visible. Update results appear below the buttons and wrap
+within the settings panel. A reset with nothing to change is visibly disabled.
