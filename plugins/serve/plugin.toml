@@ -7,7 +7,7 @@
 [plugin]
 id = "serve"
 name = "Model server"
-version = "0.1.4"
+version = "0.1.5"
 description = "This computer's model server: reads the GPUs, plans and runs the lanes (one recipe, a model on one of our patched engines, per lane), serves the models the Cortex apps on this computer use, and adds up the whole mesh for the cluster view."
 license = "UNLICENSED"
 platforms = ["macos", "linux"]
