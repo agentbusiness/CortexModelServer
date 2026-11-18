@@ -61,6 +61,9 @@ add_executable(llama-server
     ${SERVER}/server-tools.cpp
     ${SERVER}/server-mcp.cpp
     ${SERVER}/server-schema.cpp
+    # CortexModelServer patch: c2cf5f9's server-context.cpp calls the realtime slots and routes,
+    # which live here; CortexAgent's list has no such file yet, and the executable does not link without it
+    ${SERVER}/server-realtime.cpp
     # CortexModelServer patch: the vendored HTTP layer (CortexAgent hosts the core in-process)
     ${SERVER}/server-http.cpp
 )

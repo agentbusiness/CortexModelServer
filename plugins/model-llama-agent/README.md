@@ -122,6 +122,8 @@ are CortexAgent's unchanged. What differs is lane plumbing or a marked patch
   (`agent-server/`, see Engine): the HTTP layer (`server-http.cpp`, cpp-httplib, the empty UI
   table), the model alias, and the read-only routes `/v1/models`, `/models`, `/props`, `/metrics`.
   `server.rs` adds `--no-webui --host 127.0.0.1 --port P` after CortexAgent's arguments.
+  `server-realtime.cpp` is in the executable's sources: llama.cpp `c2cf5f9`'s `server-context.cpp`
+  calls it, and CortexAgent's source list does not have it yet.
 - `--slot-save-path`: this lane's `CORTEX_PLUGIN_DATA/slots` instead of
   `~/.cortexagent/cache/inference/llama` (lanes never share slot files).
 - Lane ceilings in the fit (`fit.rs`, `server.rs`): `slots` fixes the count (CortexAgent's
