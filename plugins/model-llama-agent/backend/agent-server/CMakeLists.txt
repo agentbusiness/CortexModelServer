@@ -1,8 +1,8 @@
 # CortexModelServer: from CortexAgent (crates/llama-engine/native/CMakeLists.txt).
 #
 # Builds `llama-server` from CortexAgent's vendored llama.cpp (../vendor/llama.cpp, byte for byte
-# CortexAgent's vendor/llama.cpp: unslothai/llama.cpp `468ad58` (b11876) with its four patch sites). CortexAgent copied
-# only the sources it builds, so the tree has no tools/CMakeLists.txt, no tools/server/CMakeLists.txt,
+# CortexAgent's vendor/llama.cpp: unslothai/llama.cpp `c2cf5f9` (b12347) with its four patch sites). CortexAgent copied
+# only the sources it builds, so the tree has no tools/CMakeLists.txt,
 # no server.cpp / main.cpp and no tools/ui. The vendored tree is therefore added exactly the way
 # CortexAgent's engine shim adds it (same cache settings), and the executable is assembled here:
 # the server core CortexAgent links (server-context.cpp and the rest, carrying the patches), plus
@@ -20,8 +20,8 @@ set(BUILD_SHARED_LIBS     OFF CACHE BOOL "" FORCE)
 # (vendor/llama.cpp/REVISION), a 0.7.0 development build; it is named as they name it, so all
 # three report the same version.
 set(LLAMA_BUILD_IS_DEV    ON  CACHE BOOL "" FORCE)
-set(LLAMA_BUILD_NUMBER    11876)
-set(LLAMA_BUILD_COMMIT    468ad58)
+set(LLAMA_BUILD_NUMBER    12347)
+set(LLAMA_BUILD_COMMIT    c2cf5f9)
 set(LLAMA_BUILD_COMMON    ON  CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS     OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_EXAMPLES  OFF CACHE BOOL "" FORCE)

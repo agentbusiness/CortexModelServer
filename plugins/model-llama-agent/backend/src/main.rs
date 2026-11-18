@@ -1,5 +1,5 @@
 //! `cc-model-llama-agent`: CortexModelServer's engine plugin (`model@1`) for CortexAgent's llama.cpp
-//! (unslothai/llama.cpp `468ad58`, b11876, with its four patch sites), its Gemma 4 catalog and its per-machine fitter, on
+//! (unslothai/llama.cpp `c2cf5f9`, b12347, with its four patch sites), its Gemma 4 catalog and its per-machine fitter, on
 //! a supervised llama-server built from that source (see `agent-server/`). The frame runs one
 //! instance per lane.
 //!

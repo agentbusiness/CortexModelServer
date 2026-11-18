@@ -84,9 +84,9 @@ The office model's pool is counted in 32k shares in every app (`--kv-unified`, `
 
 ## Engines are copied, not rewritten
 
-Each engine plugin is the origin app's code, copied bit for bit: its vendored engine (uzu `1763a366`
-with P1–P8 from CortexCode; llama.cpp `468ad58` with CortexTerm's 4 patches; CortexAgent's llama.cpp
-`468ad58` with its 4 (as CortexAgent vendors it now); PrismML's fork for Bonsai; the knowledge app's candle relex and ModernBERT), its catalog, its
+Each engine plugin is the origin app's code, copied bit for bit: its vendored engine (uzu `90f8bdb7`
+with P1–P8 from CortexCode; llama.cpp `c2cf5f9` with CortexTerm's 4 patches; CortexAgent's llama.cpp
+`c2cf5f9` with its 4 (as CortexAgent vendors it now); PrismML's fork for Bonsai; the knowledge app's candle relex and ModernBERT), its catalog, its
 settings code. A change this app needs is the smallest possible, marked in the code
 (`// CortexModelServer patch:`) and listed in the plugin's README under "CortexModelServer changes".
 Upgrading an engine is a standard change: every app that carries it takes the upgrade.
@@ -96,9 +96,9 @@ whenever an origin app changes its engine):
 
 | Engine plugin | Origin | Must be identical | Check |
 |---|---|---|---|
-| `model-uzu` | CortexCode `plugins/model-uzu` | `backend/vendor/uzu` (uzu `1763a366`, P1–P8, `PATCHES.md`, `REVISION`) | `diff -rq -x target plugins/model-uzu/backend/vendor ../CortexCode/plugins/model-uzu/backend/vendor` |
+| `model-uzu` | CortexCode `plugins/model-uzu` | `backend/vendor/uzu` (uzu `90f8bdb7`, P1–P8, `PATCHES.md`, `REVISION`) | `diff -rq -x target plugins/model-uzu/backend/vendor ../CortexCode/plugins/model-uzu/backend/vendor` |
 | `model-bonsai` | CortexCode `plugins/model-bonsai` | `backend/vendor` (PrismML fork) and `backend/native` (C shim) | the same `diff -rq` on both folders |
-| `model-llama` | CortexTerm `plugins/model-llama` (= the knowledge app's worker) | `backend/vendor` (llama.cpp `468ad58`, 4 patches); `server-context.cpp` also equals `model-worker/vendor/llama.cpp` in the knowledge app's repository | `diff -rq` against CortexTerm; `cmp` against the knowledge app's repository |
+| `model-llama` | CortexTerm `plugins/model-llama` (= the knowledge app's worker) | `backend/vendor` (llama.cpp `c2cf5f9`, 4 patches); `server-context.cpp` also equals `model-worker/vendor/llama.cpp` in the knowledge app's repository | `diff -rq` against CortexTerm; `cmp` against the knowledge app's repository |
 | `model-llama-agent` | CortexAgent `vendor/llama.cpp`, `crates/model`, `crates/llama-engine` | `backend/vendor/llama.cpp` as CortexAgent has it now (its `REVISION`, `PATCHES.md`); catalog, fitter and server flags as in `crates/model` | `diff -rq` against `../CortexAgent/vendor/llama.cpp` |
 | `model-relex` | the knowledge app's `model-worker/src/relex` | `backend/src/relex/` (candle 0.11.0, tokenizers 0.22.2) | `diff -rq` against the knowledge app's repository; `Cargo.lock` versions |
 
@@ -106,7 +106,7 @@ Outside the vendored engines, a plugin's own code may differ from its origin onl
 patch (`// CortexModelServer patch:`, or the plumbing it needs) listed in its README: diff each
 source file against the origin and read every hunk. When an origin moves (a new engine revision,
 new patches, a changed catalog or setting), this app takes the same change in the same piece of
-work. LFM2.5 runs on CortexCode's uzu (`1763a366`, P1–P8) with the knowledge app's exact LFM settings and
+work. LFM2.5 runs on CortexCode's uzu (`90f8bdb7`, P1–P8) with the knowledge app's exact LFM settings and
 template; the knowledge app's own copy is an older checkout of the same patched uzu.
 
 ## Lanes

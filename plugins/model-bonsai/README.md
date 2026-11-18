@@ -3,7 +3,7 @@
 `cc-model-bonsai` serves the `model` category over CPP/1 with **Ternary Bonsai 2 27B** (PrismML's
 ternary Qwen3.8-27B: weights in {-1, 0, +1} with FP16 group scales, Hadamard-rotated) on PrismML's
 fork of llama.cpp, embedded **in-process** with Metal. `backend/vendor/llama.cpp` holds the fork's
-sources at `0082ac24a89ae62132041b40e2c0170e278a98f4` (branch `prism`, see `REVISION`; patches in
+sources at `3f035ba664f8f08c3d9432b6421f8f1a0da1f37a` (branch `prism`, see `REVISION`; patches in
 `PATCHES.md`). Rust calls it through a flat C shim (`backend/native/shim.cpp`), so no llama.cpp
 struct layout is copied into Rust. Swap policy: drain first.
 
@@ -111,7 +111,7 @@ The variants carry PrismML's vision projector (`…-mmproj-Q8_0.gguf`, 0.63 GB),
 ## CortexModelServer changes
 
 Copied from CortexCode's `plugins/model-bonsai` (version 0.1.20). `backend/vendor/llama.cpp`
-(PrismML `0082ac24`) and `backend/native` (the shim) are byte-identical to CortexCode's. Changes:
+(PrismML `3f035ba6`) and `backend/native` (the shim) are byte-identical to CortexCode's. Changes:
 
 - `backend/src/runtime.rs`, `backend/src/plugin.rs`: loading on demand. With `idle_unload_s` set
   (every lane has it), the model loads on its first real call and unloads after that many seconds

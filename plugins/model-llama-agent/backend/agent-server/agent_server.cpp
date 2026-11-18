@@ -2,7 +2,7 @@
 // loopback HTTP the way upstream llama.cpp's tools/server/server.cpp hosts one model.
 //
 // CortexAgent runs llama.cpp's own server core (server_context and server_routes, from its vendored
-// unslothai/llama.cpp 468ad58 (b11876) with the four patch sites in vendor/llama.cpp/PATCHES.md)
+// unslothai/llama.cpp c2cf5f9 (b12347) with the four patch sites in vendor/llama.cpp/PATCHES.md)
 // in-process, with no HTTP server.
 // Its vendored tree does not contain upstream's server.cpp, so this file is the executable's entry:
 //
@@ -15,7 +15,7 @@
 //   gc_engine's own /tool-call-markers), plus the read-only ones the plugin and the frame read
 //   (/v1/models, /props, /metrics), each wrapped with upstream's exception-to-response mapping.
 //
-// Not carried over from upstream's server.cpp (468ad58): router mode, the download worker, -hf /
+// Not carried over from upstream's server.cpp (c2cf5f9): router mode, the download worker, -hf /
 // docker model resolution, llama-connect, the MCP proxy, server tools and the resumable-stream
 // routes (CortexAgent uses none of them; they stay off without their flags). Its
 // server_prepare_params is reduced to the model alias: the embeddings batch fix, the auto

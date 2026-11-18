@@ -8,23 +8,23 @@ replaced. macOS (Metal) only. The frame runs one instance per lane.
 ## Engine
 
 - `backend/vendor/llama.cpp` is CortexAgent's `vendor/llama.cpp` byte for byte (`diff -rq` empty,
-  resynced 2026-11-07): unslothai/llama.cpp commit `468ad5824c4afb245338f0ede29ef31680ba59c7`
-  (build b11876, a 0.7.0 development build), the same source as CortexTerm's model-llama, with the
+  resynced 2026-11-18): unslothai/llama.cpp commit `c2cf5f983a01bc2ea7a5d68a7ce4fb171e6fe335`
+  (build b12347, a 0.7.0 development build), the same source as CortexTerm's model-llama, with the
   four patch sites in `tools/server/server-context.cpp` described in `vendor/llama.cpp/PATCHES.md`
   (marked `GlobalCortex patch`). It replaced v0.6.0 `d8123504` (five sites; upstream now does the
   first itself).
 - CortexAgent copied only what it builds: CPU, BLAS, ET and Metal backends, `tools/mtmd`, and the
   server core without upstream's `server.cpp`, `main.cpp`, `server-models`, `server-connect`,
-  `tools/CMakeLists.txt`, `tools/server/CMakeLists.txt` or `tools/ui`. So the stock `llama-server` target cannot be built from this tree. `agent-server/`
+  `tools/CMakeLists.txt` or `tools/ui`. The retained server CMake file is inactive because tools are off. So the stock `llama-server` target cannot be built from this tree. `agent-server/`
   builds it instead, without touching the tree:
   - `CMakeLists.txt` adds the tree exactly as CortexAgent's engine shim does
     (`crates/llama-engine/native/CMakeLists.txt`, same cache settings, including its
-    `LLAMA_BUILD_IS_DEV ON`, `LLAMA_BUILD_NUMBER 11876`, `LLAMA_BUILD_COMMIT 468ad58`, so
-    `--version` reads `0.7.0-dev (build 11876, commit 468ad58)`), and links the server core
+    `LLAMA_BUILD_IS_DEV ON`, `LLAMA_BUILD_NUMBER 12347`, `LLAMA_BUILD_COMMIT c2cf5f9`, so
+    `--version` reads `0.7.0-dev (build 12347, commit c2cf5f9)`), and links the server core
     CortexAgent links (it carries the patches) with the vendored `server-http.cpp` and cpp-httplib;
   - `agent_server.cpp` is the entry point. It parses arguments with llama.cpp's own parser
     (`LLAMA_EXAMPLE_SERVER`), loads the model and runs the task loop as upstream's `server.cpp`
-    (468ad58) instance mode does for one model, including its `ex_wrapper` exception mapping and
+    (c2cf5f9) instance mode does for one model, including its `ex_wrapper` exception mapping and
     the memory breakdown printed at exit. Of upstream's `server_prepare_params` only the model alias
     is kept (gc_engine runs none of it; the auto `--parallel` and `--kv-unified-per-slot` sizing
     never trigger with CortexAgent's explicit `--parallel` and `--ctx-size`). Router mode, the
@@ -144,7 +144,7 @@ Each one is marked in the code with `// CortexModelServer: from CortexAgent` or
 - `backend/Cargo.toml`: the package and binary are renamed `cc-model-llama-agent`.
 - `backend/build.sh`: builds `agent-server/` (see Engine) on macOS only. The build name comes from
   `agent-server/CMakeLists.txt` (CortexAgent's), not from a `-DLLAMA_BUILD_COMMIT` flag.
-- `backend/vendor/`: CortexAgent's tree (the same 468ad58 source as ct's, trimmed to what CortexAgent
+- `backend/vendor/`: CortexAgent's tree (the same c2cf5f9 source as ct's, trimmed to what CortexAgent
   builds, with CortexAgent's patches). ct's `vendor/PATCHES.md` and `vendor/REVISION` are gone; the
   tree carries its own.
 - `backend/agent-server/*`: new (see Engine).

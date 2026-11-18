@@ -1,8 +1,8 @@
-# model-llama: llama.cpp `468ad58` with CortexTerm's 4 patches (`model@1`)
+# model-llama: llama.cpp `c2cf5f9` with CortexTerm's 4 patches (`model@1`)
 
 CortexTerm's `plugins/model-llama`, copied and renamed (`cortexterm` -> `cortexmodelserver` in the
 manifest, Cargo description, `cache_key` prefix and `holder`). `backend/vendor/llama.cpp` is
-byte-identical to CortexTerm's: unslothai `468ad58` (b11876) with the four `server-context.cpp`
+byte-identical to CortexTerm's: unslothai `c2cf5f9` (b12347) with the four `server-context.cpp`
 patches in `backend/vendor/PATCHES.md`. Build: `sh backend/build.sh` (Metal on macOS; CUDA, Vulkan
 and CPU backends as loadable libraries on Linux).
 

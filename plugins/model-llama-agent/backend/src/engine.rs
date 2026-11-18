@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 // CortexModelServer: from CortexAgent (vendor/llama.cpp/REVISION and PATCHES.md).
-pub const ENGINE_REVISION: &str = "llama.cpp unslothai 468ad58 (b11876) + CortexAgent vendor/llama.cpp/PATCHES.md (4 sites)";
+pub const ENGINE_REVISION: &str = "llama.cpp unslothai c2cf5f9 (b12347) + CortexAgent vendor/llama.cpp/PATCHES.md (4 sites)";
 const WATCH_EVERY: Duration = Duration::from_secs(5);
 
 /// Where stream items go: the caller over CPP/1, or stdout (the `call` command).
