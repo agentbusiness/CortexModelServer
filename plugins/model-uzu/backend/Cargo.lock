@@ -292,6 +292,7 @@ dependencies = [
  "cc-model-kit",
  "cc-protocol",
  "cc-shared-models",
+ "cc-stats-kit",
  "futures",
  "futures-util",
  "half",
@@ -335,6 +336,20 @@ name = "cc-shared-models"
 version = "0.1.0"
 dependencies = [
  "tracing",
+]
+
+[[package]]
+name = "cc-stats-kit"
+version = "0.1.0"
+dependencies = [
+ "cc-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

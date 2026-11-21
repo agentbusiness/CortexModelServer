@@ -40,6 +40,10 @@ memory. Its code was copied from CortexTerm (`../CortexTerm`), which was copied 
   `settings.rs` and `app.rs` the same in every repository, byte for byte;
 - `sandbox-kit/`, `service-kit/`, `shared-models/`, `model-kit/`: the same code in every repository,
   byte for byte.
+- what an app records about itself and its delivery to CortexManage, `stats-kit/` (errors and
+  calls as Parquet day files, `contracts::reports`): the same code in every repository, byte for
+  byte; every process calls `cc_stats_kit::start` in place of its own log setup, and the
+  `stats` plugin (`plugins/stats`, the same in every repository) alone writes and delivers.
 
 **The standard is followed 1:1. It is not optional and not a starting point.** The cortex-mesh
 (transport, ALPNs, pairing, the membership log, cards, claims and their ranking, lending,
