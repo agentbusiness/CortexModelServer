@@ -636,7 +636,9 @@ impl Server {
             let params = json!({ cc_protocol::contracts::model::PLUGIN_PARAM: id });
             let limit = Duration::from_secs(3);
             let slots: Option<SlotsResult> = tokio::time::timeout(limit, ctx.call("model.slots", params.clone())).await.ok().and_then(Result::ok).and_then(|v| serde_json::from_value(v).ok());
-            let metrics: Option<LiveMetrics> = tokio::time::timeout(limit, ctx.call("model.metrics", params.clone())).await.ok().and_then(Result::ok).and_then(|v| serde_json::from_value(v).ok());
+            // The slots carry the lane's recent throughput; `model.metrics` is optional and most
+            // model plugins do not answer it (seen: about two refused calls a second).
+            let metrics: Option<LiveMetrics> = slots.as_ref().and_then(|slots| slots.metrics.clone());
             let needs_info = lock(&self.state).live.get(&id).is_none_or(|live| live.family.is_empty() && live.quant.is_empty());
             let info: Option<ModelInfo> = if needs_info || slots.as_ref().is_some_and(|s| s.loaded) {
                 tokio::time::timeout(limit, ctx.call("model.info", params)).await.ok().and_then(Result::ok).and_then(|v| serde_json::from_value(v).ok())
