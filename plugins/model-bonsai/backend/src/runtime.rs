@@ -830,6 +830,7 @@ impl Runtime {
                     if ended.is_some() {
                         continue;
                     }
+                    parser.token();
                     let text = detokenizer.push(token);
                     if !text.is_empty() {
                         feed(&text, &mut parser, &mut ended, &stop);
@@ -1216,6 +1217,7 @@ impl Runtime {
 
 fn usage_of(outcome: &Outcome) -> Usage {
     Usage {
+        reasoning_tokens: 0,
         prompt_tokens: outcome.prompt_tokens,
         cached_tokens: outcome.cached_tokens,
         completion_tokens: outcome.completion_tokens,
@@ -1248,7 +1250,7 @@ fn chat_result(generated: Generated) -> ChatResult {
         reasoning: parser.reasoning.clone(),
         tool_calls: parser.calls.clone(),
         finish_reason: finish_reason.into(),
-        usage: usage_of(&outcome),
+        usage: Usage { reasoning_tokens: parser.reasoning_tokens, ..usage_of(&outcome) },
         probs: None,
     }
 }
