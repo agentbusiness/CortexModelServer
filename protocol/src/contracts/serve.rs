@@ -532,9 +532,9 @@ pub struct Cluster {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct HistoryParams {
-    /// `cluster` | `node` | `lane`
+    /// `cluster`: the whole mesh, the one history kept.
     pub scope: String,
-    /// The lane id for `lane`.
+    /// Not used by `cluster`.
     #[serde(default)]
     pub id: String,
     /// How far back, seconds (3600, 86400, 604800).

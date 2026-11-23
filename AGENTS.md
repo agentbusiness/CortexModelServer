@@ -147,7 +147,7 @@ template; the knowledge app's own copy is an older checkout of the same patched 
 **The graph is the only record**, exactly as in CortexTerm: settings, lanes, GPUs, engines, plans,
 calibrations, metric summaries, served calls and lane events are in IronGraph, written through the
 ordered outbox (`graph.rs`, the same file as CortexTerm's system plugin). Histories are streams with a
-retention (`model.served`, `model.lanes.events`, `serve.minutes`, `serve.cluster.minutes`). Live
+retention (`model.served`, `model.lanes.events`, `serve.cluster.minutes`). Live
 readings are streamed (`serve.sample`, `system.sample`) and not stored per sample. No JSON, TOML or
 other data files hold records. Weights stay files in `~/.cortex-models`; recipes are shipped data.
 See `docs/GRAPH-MODEL.md`.

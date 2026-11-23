@@ -11,8 +11,8 @@
 //!   lane is retired.
 //! - `(:Calibration {key: lane})-[:OF]->(:Lane)`: measured speeds, temporal.
 //! - Streams: `model.served` (one record per served call, 30 days), `model.lanes.events` (lane
-//!   added, changed, removed, by whom; 365 days), `serve.minutes` (this computer each minute,
-//!   90 days), `serve.cluster.minutes` (the mesh each minute, 90 days).
+//!   added, changed, removed, by whom; 365 days), `serve.cluster.minutes` (the mesh each minute,
+//!   90 days). This computer's own minutes are not kept: nothing read them back.
 //! - `(:Declined {key: <recipe>-g<gpu>})-[:ON]->(:Machine)`: a planned lane removed by hand; the plan
 //!   does not bring it back (until the plan is reset).
 //!
@@ -639,8 +639,10 @@ impl Server {
             // The slots carry the lane's recent throughput; `model.metrics` is optional and most
             // model plugins do not answer it (seen: about two refused calls a second).
             let metrics: Option<LiveMetrics> = slots.as_ref().and_then(|slots| slots.metrics.clone());
-            let needs_info = lock(&self.state).live.get(&id).is_none_or(|live| live.family.is_empty() && live.quant.is_empty());
-            let info: Option<ModelInfo> = if needs_info || slots.as_ref().is_some_and(|s| s.loaded) {
+            // What `model.info` says changes only when the model loads: it is read for a lane not
+            // known yet and once each time the lane becomes loaded, never on every sample.
+            let (needs_info, was_loaded) = lock(&self.state).live.get(&id).map_or((true, false), |live| (live.family.is_empty() && live.quant.is_empty(), live.loaded));
+            let info: Option<ModelInfo> = if needs_info || (slots.as_ref().is_some_and(|s| s.loaded) && !was_loaded) {
                 tokio::time::timeout(limit, ctx.call("model.info", params)).await.ok().and_then(Result::ok).and_then(|v| serde_json::from_value(v).ok())
             } else {
                 None
@@ -822,15 +824,8 @@ impl Server {
     }
 
     async fn each_minute(&self) {
-        // The minute's summary of this computer.
         let sample = self.sample_now();
-        let lanes: Vec<Value> = sample
-            .lanes
-            .iter()
-            .map(|lane| json!({"id": lane.settings.id, "recipe": lane.settings.recipe, "tok_s": lane.tok_s, "busy": lane.slots_busy, "slots": lane.slots, "queued": lane.queued, "tokens_hour": lane.tokens_hour, "loaded": lane.loaded}))
-            .collect();
-        graph::append("serve.minutes", vec![json!({"totals": sample.totals, "lanes": lanes, "gpus": sample.gpus.iter().map(|g| json!({"index": g.index, "util": g.util, "used_bytes": g.used_bytes, "power_w": g.power_w, "temp_c": g.temp_c})).collect::<Vec<_>>()})], 90);
-        // The mesh's.
+        // The mesh's minute.
         self.refresh_wants().await;
         let cluster = self.compute_cluster(&sample).await;
         graph::append("serve.cluster.minutes", vec![json!({"totals": cluster.totals, "servers": cluster.servers, "servers_online": cluster.servers_online, "reporting": cluster.reporting, "gpus": cluster.gpus})], 90);
@@ -1070,8 +1065,7 @@ impl Server {
     async fn history(&self, params: HistoryParams) -> Result<History, RpcError> {
         let topic = match params.scope.as_str() {
             "cluster" => "serve.cluster.minutes",
-            "node" | "lane" => "serve.minutes",
-            other => return Err(invalid(format!("scope `{other}`: cluster, node or lane"))),
+            other => return Err(invalid(format!("scope `{other}`: cluster"))),
         };
         let range = params.range_s.clamp(60, 90 * 86_400);
         let since = util::now_ms().saturating_sub(range * 1000);
@@ -1081,18 +1075,7 @@ impl Server {
         let mut points: Vec<HistoryPoint> = Vec::new();
         let mut current: Option<(u64, Vec<Totals>)> = None;
         for entry in entries {
-            let totals: Option<Totals> = if params.scope == "lane" {
-                entry.value.get("lanes").and_then(Value::as_array).and_then(|lanes| lanes.iter().find(|lane| lane.get("id").and_then(Value::as_str) == Some(params.id.as_str()))).map(|lane| Totals {
-                    tok_s: lane.get("tok_s").and_then(Value::as_f64).unwrap_or(0.0),
-                    slots_busy: lane.get("busy").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    slots: lane.get("slots").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    queued: lane.get("queued").and_then(Value::as_u64).unwrap_or(0) as u32,
-                    tokens_hour: lane.get("tokens_hour").and_then(Value::as_u64).unwrap_or(0),
-                    ..Totals::default()
-                })
-            } else {
-                entry.value.get("totals").cloned().and_then(|value| serde_json::from_value(value).ok())
-            };
+            let totals: Option<Totals> = entry.value.get("totals").cloned().and_then(|value| serde_json::from_value(value).ok());
             let Some(totals) = totals else { continue };
             let bucket = entry.at_ms / bucket_ms * bucket_ms;
             match &mut current {
